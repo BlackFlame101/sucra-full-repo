@@ -1,0 +1,22 @@
+[project]
+name = "socra-backend"
+version = "0.1.0"
+description = "Socra multi-agent Socratic tutoring backend (FastAPI + LangGraph)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.136.1",
+    "google-generativeai>=0.8.6",
+    "httpx>=0.28.1",
+    "langchain>=1.2.17",
+    "langchain-google-genai>=4.2.2",
+    "langgraph>=1.1.10",
+    "pydantic>=2.13.4",
+    "python-dotenv>=1.2.2",
+    "python-multipart>=0.0.27",
+    "supabase>=2.30.0",
+    "uvicorn[standard]>=0.46.0",
+    "websockets>=15.0.1",
+]
+
+[tool.uv]
+package = false

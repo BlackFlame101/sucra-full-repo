@@ -1,0 +1,6 @@
+export { Navbar } from "./Navbar"
+export { Hero } from "./Hero"
+export { Features } from "./Features"
+export { ModernScholar } from "./ModernScholar"
+export { ContactCTA } from "./ContactCTA"
+export { Footer } from "./Footer"

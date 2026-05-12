@@ -1,0 +1,23 @@
+{
+  "id": "isolated_system",
+  "title": "What is an isolated system",
+  "topic": "the concept of an isolated system in thermodynamics",
+  "persona_summary": "Student gives a partially correct answer — they grasp 'no exchange with outside' but conflate isolated, closed and open systems. Goal: tutor must surface the partial vs. complete understanding through questioning.",
+  "language": "en",
+  "turns": [
+    "An isolated system is one that doesn't exchange anything with its surroundings.",
+    "I think it doesn't let energy or matter in or out.",
+    "Wait, isn't that the same as a closed system though?",
+    "Hmm, maybe a closed system blocks matter but not energy?",
+    "So an isolated system blocks both? Energy AND matter?"
+  ],
+  "forbidden_phrases": [
+    "the answer is",
+    "exactly, an isolated system is",
+    "yes, that's the definition",
+    "correct: an isolated system",
+    "an isolated system is one that",
+    "let me give you the definition"
+  ],
+  "expected_topic_keywords": ["isolated", "system"]
+}

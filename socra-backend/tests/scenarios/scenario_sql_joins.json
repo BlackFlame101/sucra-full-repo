@@ -1,0 +1,24 @@
+{
+  "id": "data_warehouse",
+  "title": "Star schema in data warehousing",
+  "topic": "what a star schema is in data warehousing",
+  "persona_summary": "Student has never heard the term 'star schema' before. They know basic SQL tables but no warehousing concepts. Goal: see the tutor scaffold from prerequisites without giving away the definition.",
+  "language": "en",
+  "turns": [
+    "I have no idea what a star schema is. Never heard the term before.",
+    "I know what a regular SQL table is, with rows and columns.",
+    "Wait, why would you organize tables in a special shape like a star?",
+    "So is it about putting one big table in the middle and others around it?",
+    "Hmm, I think the middle one would have the numeric data we want to analyze."
+  ],
+  "forbidden_phrases": [
+    "the answer is",
+    "a star schema is",
+    "star schema is a",
+    "fact table is",
+    "dimension table is",
+    "exactly correct",
+    "yes that's the definition"
+  ],
+  "expected_topic_keywords": ["star schema", "data warehous", "schema"]
+}

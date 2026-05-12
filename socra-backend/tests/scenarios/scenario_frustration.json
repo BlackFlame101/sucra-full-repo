@@ -1,0 +1,22 @@
+{
+  "id": "frustration",
+  "title": "Graceful handling of student frustration",
+  "topic": "thermodynamics fundamentals (student in distress)",
+  "persona_summary": "Student is overwhelmed and expresses frustration. Goal: verify the tutor de-escalates with empathy, scaffolds smaller, and never abandons the Socratic method by dumping a textbook definition.",
+  "language": "en",
+  "turns": [
+    "Honestly I don't understand any of this. It's all just symbols and words to me.",
+    "I'm getting really frustrated. Can you just tell me the answer?",
+    "I'm not stupid, I just need someone to explain it normally.",
+    "OK fine. What is the smallest, most basic idea I should know about energy?",
+    "Hmm, I guess energy is something that can move from one thing to another."
+  ],
+  "forbidden_phrases": [
+    "the answer is",
+    "here is the definition",
+    "let me just tell you",
+    "the textbook definition is",
+    "fine, here is what it means"
+  ],
+  "expected_topic_keywords": []
+}

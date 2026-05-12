@@ -1,0 +1,24 @@
+{
+  "id": "fact_vs_dimension",
+  "title": "Fact table vs dimension table",
+  "topic": "the difference between a fact table and a dimension table",
+  "persona_summary": "Student confuses fact and dimension tables — tends to swap them or describe both as 'tables that hold data'. Goal: tutor must reveal the confusion through questioning, not correction.",
+  "language": "en",
+  "turns": [
+    "I think a fact table holds names and labels and a dimension table holds the numbers.",
+    "Both of them are just tables with rows, so I don't really see the difference.",
+    "OK, the dimension table is the one with measurements like sales totals?",
+    "Hmm, but where would I store the customer's name then?",
+    "Oh — so maybe I had it backwards. The fact table is the numeric one?"
+  ],
+  "forbidden_phrases": [
+    "the answer is",
+    "you have it backwards",
+    "fact table holds the measures",
+    "dimension table holds the descriptive",
+    "exactly, you had it reversed",
+    "no, that is wrong",
+    "let me correct you"
+  ],
+  "expected_topic_keywords": ["fact", "dimension", "table", "star schema", "warehous", "schema"]
+}

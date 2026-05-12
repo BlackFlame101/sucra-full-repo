@@ -1,0 +1,47 @@
+"""Centralized configuration loaded from environment variables."""
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+
+
+load_dotenv()
+
+
+class Settings(BaseModel):
+    supabase_url: str = Field(default_factory=lambda: os.environ["SUPABASE_URL"])
+    supabase_service_role_key: str = Field(
+        default_factory=lambda: os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+    )
+    gemini_api_key: str = Field(default_factory=lambda: os.environ["GEMINI_API_KEY"])
+
+    backend_port: int = Field(
+        default_factory=lambda: int(os.environ.get("BACKEND_PORT", "8000"))
+    )
+    frontend_url: str = Field(
+        default_factory=lambda: os.environ.get("FRONTEND_URL", "http://localhost:3000")
+    )
+    log_level: str = Field(
+        default_factory=lambda: os.environ.get("LOG_LEVEL", "INFO")
+    )
+
+    # Model configuration.
+    # gemini-2.5-flash-lite has a much higher free-tier daily quota (1000+/day)
+    # than gemini-2.5-flash (~20/day) which is essential for development.
+    # Users can override with their own API key via the Settings dialog and
+    # pick gemini-2.5-flash / gemini-2.5-pro per request.
+    chat_model: str = "gemini-2.5-flash-lite"
+    # text-embedding-004 was retired April 2026. We use gemini-embedding-001
+    # truncated to 768 dims (Matryoshka) so it lines up with the vector(768)
+    # column in public.embeddings. Existing chunks need re-embedding to fully
+    # benefit from this; until then RAG similarity is degraded but functional.
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dim: int = 768
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()

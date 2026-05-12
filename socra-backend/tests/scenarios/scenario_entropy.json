@@ -1,0 +1,24 @@
+{
+  "id": "entropy",
+  "title": "Entropy and the second law of thermodynamics",
+  "topic": "entropy and the second law of thermodynamics",
+  "persona_summary": "Student arrives with the popular but flawed 'entropy = disorder of a messy room' intuition. They hold a vague hunch about heat flow but cannot articulate why the second law is universal.",
+  "language": "en",
+  "turns": [
+    "Entropy is just a measure of disorder, right? Like how messy a room is.",
+    "Hmm, I think energy spreads out somehow when stuff cools down.",
+    "OK so heat always flows from hot to cold — is that the second law?",
+    "But wait, why does it have to be that way? Couldn't it just go the other way sometimes?",
+    "I guess the universe always tends toward more disorder over time."
+  ],
+  "forbidden_phrases": [
+    "the answer is",
+    "entropy is the measure of",
+    "entropy is a measure of",
+    "the second law states that",
+    "entropy = disorder",
+    "exactly correct",
+    "that is correct, the answer"
+  ],
+  "expected_topic_keywords": ["entropy", "thermodynamic"]
+}
