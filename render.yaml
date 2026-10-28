@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: socra-backend
+    runtime: python
+    plan: free
+    rootDir: socra-backend
+    buildCommand: uv sync --locked --no-dev
+    startCommand: uv run uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CHAT_MODEL
+        value: gemini-3.5-flash-lite
+      - key: LOG_LEVEL
+        value: INFO
