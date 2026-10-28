@@ -39,30 +39,36 @@ export type Database = {
       documents: {
         Row: {
           course_id: string
+          content_hash: string | null
           created_at: string
           file_size: number | null
           filename: string
           id: string
           page_count: number | null
           storage_path: string
+          summary_status: string
         }
         Insert: {
           course_id: string
+          content_hash?: string | null
           created_at?: string
           file_size?: number | null
           filename: string
           id?: string
           page_count?: number | null
           storage_path: string
+          summary_status?: string
         }
         Update: {
           course_id?: string
+          content_hash?: string | null
           created_at?: string
           file_size?: number | null
           filename?: string
           id?: string
           page_count?: number | null
           storage_path?: string
+          summary_status?: string
         }
         Relationships: [
           {
@@ -73,6 +79,48 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      document_summaries: {
+        Row: {
+          id: string
+          document_id: string
+          course_id: string
+          document_version: string
+          level: "document" | "section"
+          section_index: number | null
+          title: string
+          summary: string
+          page_start: number
+          page_end: number
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          document_id: string
+          course_id: string
+          document_version: string
+          level: "document" | "section"
+          section_index?: number | null
+          title: string
+          summary: string
+          page_start: number
+          page_end: number
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          document_id?: string
+          course_id?: string
+          document_version?: string
+          level?: "document" | "section"
+          section_index?: number | null
+          title?: string
+          summary?: string
+          page_start?: number
+          page_end?: number
+          created_at?: string
+        }
+        Relationships: []
       }
       embeddings: {
         Row: {

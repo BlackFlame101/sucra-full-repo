@@ -1,14 +1,14 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useRef, type KeyboardEvent } from "react"
 import { useParams, useRouter } from "next/navigation"
-import { ArrowLeft, Plus, Upload, MessageSquare, MessageCircle } from "lucide-react"
+import { ArrowLeft, Plus, Upload, MessageSquare, MessageCircle, ClipboardCheck, Trash2, Pencil, Check, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { DocumentList } from "@/components/documents/DocumentList"
 import { UploadModal } from "@/components/documents/UploadModal"
 import { toast } from "sonner"
-import type { Course, Document, Session } from "@/types"
+import type { Course, CourseSession, Document } from "@/types"
 import Link from "next/link"
 
 export default function CourseDetailPage() {
@@ -18,12 +18,23 @@ export default function CourseDetailPage() {
 
   const [course, setCourse] = useState<Course | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
-  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessions, setSessions] = useState<CourseSession[]>([])
   const [loadingCourse, setLoadingCourse] = useState(true)
   const [loadingDocs, setLoadingDocs] = useState(true)
   const [loadingSessions, setLoadingSessions] = useState(true)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [creatingSession, setCreatingSession] = useState(false)
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null)
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState("")
+  const editTitleRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (editingSessionId) {
+      editTitleRef.current?.focus()
+      editTitleRef.current?.select()
+    }
+  }, [editingSessionId])
 
   const fetchDocuments = useCallback(async () => {
     setLoadingDocs(true)
@@ -97,6 +108,82 @@ export default function CourseDetailPage() {
     }
   }
 
+  const handleNewExam = async () => {
+    setCreatingSession(true)
+    try {
+      const res = await fetch("/api/sessions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ courseId, title: "Mixed Course Exam" }),
+      })
+      if (!res.ok) throw new Error()
+      const session = await res.json()
+      router.push(`/dashboard/course/${courseId}/exam/${session.id}`)
+    } catch {
+      toast.error("Failed to create exam")
+      setCreatingSession(false)
+    }
+  }
+
+  const handleDeleteSession = async (session: CourseSession) => {
+    const label = session.title || "this inquiry"
+    if (!window.confirm(`Delete “${label}”? Its messages, exercises, and exam results will also be deleted.`)) return
+
+    setDeletingSessionId(session.id)
+    try {
+      const response = await fetch(`/api/sessions/update/${encodeURIComponent(session.id)}`, {
+        method: "DELETE",
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.error || "Could not delete this inquiry.")
+      }
+      setSessions((current) => current.filter((item) => item.id !== session.id))
+      toast.success("Inquiry deleted")
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not delete this inquiry.")
+    } finally {
+      setDeletingSessionId(null)
+    }
+  }
+
+  const saveSessionTitle = async () => {
+    if (!editingSessionId) return
+    const title = editingTitle.trim()
+    if (!title) {
+      toast.error("Enter a name for this inquiry")
+      return
+    }
+    try {
+      const response = await fetch(`/api/sessions/update/${encodeURIComponent(editingSessionId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.error || "Could not rename this inquiry.")
+      }
+      setSessions((current) => current.map((session) =>
+        session.id === editingSessionId ? { ...session, title } : session
+      ))
+      setEditingSessionId(null)
+      toast.success("Inquiry renamed")
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not rename this inquiry.")
+    }
+  }
+
+  const handleRenameKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      void saveSessionTitle()
+    } else if (event.key === "Escape") {
+      event.preventDefault()
+      setEditingSessionId(null)
+    }
+  }
+
   const handleDeleteDocument = async (id: string) => {
     const doc = documents.find((d) => d.id === id)
     try {
@@ -148,6 +235,15 @@ export default function CourseDetailPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            className="gap-2"
+            disabled={documents.length === 0 || creatingSession}
+            onClick={handleNewExam}
+          >
+            <ClipboardCheck className="h-4 w-4" />
+            Mixed Exam
+          </Button>
           <Button
             variant="outline"
             className="gap-2"
@@ -259,25 +355,76 @@ export default function CourseDetailPage() {
                 </div>
               ) : (
                 sessions.map((session) => (
-                  <Link
-                    key={session.id}
-                    href={`/dashboard/course/${courseId}/inquiry/${session.id}`}
-                    className="flex items-center gap-3 p-3 hover:bg-muted/30 transition-colors first:rounded-t-xl last:rounded-b-xl"
-                  >
-                    <MessageCircle className="h-4 w-4 shrink-0 text-secondary/70" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium truncate">
-                        {session.title || "Untitled"}
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">
-                        {new Date(session.updated_at).toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric",
-                        })}
-                      </p>
-                    </div>
-                  </Link>
+                  <div key={session.id} className="flex min-w-0 items-center gap-2 p-3 hover:bg-muted/30 first:rounded-t-xl last:rounded-b-xl">
+                    {editingSessionId === session.id ? (
+                      <>
+                        <input
+                          ref={editTitleRef}
+                          value={editingTitle}
+                          maxLength={80}
+                          onChange={(event) => setEditingTitle(event.target.value)}
+                          onKeyDown={handleRenameKeyDown}
+                          aria-label="Inquiry name"
+                          className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-secondary"
+                        />
+                        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label="Save name" onClick={() => void saveSessionTitle()}>
+                          <Check className="h-4 w-4 text-secondary" />
+                        </Button>
+                        <Button type="button" variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label="Cancel rename" onClick={() => setEditingSessionId(null)}>
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Link
+                          href={session.exam_id
+                          ? `/dashboard/course/${courseId}/exam/${session.id}?restore=1`
+                            : `/dashboard/course/${courseId}/inquiry/${session.id}`}
+                          className="flex min-w-0 flex-1 items-center gap-3"
+                        >
+                          <MessageCircle className="h-4 w-4 shrink-0 text-secondary/70" />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium truncate">
+                              {session.title || "Untitled"}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {new Date(session.updated_at).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric",
+                              })}
+                            </p>
+                          </div>
+                        </Link>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                          aria-label={`Rename ${session.title || "inquiry"}`}
+                          title="Rename inquiry"
+                          onClick={() => {
+                            setEditingSessionId(session.id)
+                            setEditingTitle(session.title || "")
+                          }}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      </>
+                    )}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                      aria-label={`Delete ${session.title || "inquiry"}`}
+                      title="Delete inquiry"
+                      disabled={deletingSessionId === session.id || editingSessionId === session.id}
+                      onClick={() => void handleDeleteSession(session)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                 ))
               )}
             </div>

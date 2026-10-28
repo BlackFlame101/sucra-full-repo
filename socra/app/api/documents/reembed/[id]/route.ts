@@ -3,6 +3,7 @@ import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { chunkPages } from "@/lib/pdf/chunker"
 import { parsePDF } from "@/lib/pdf/parser"
 import { generateEmbeddings } from "@/lib/embeddings/generate"
+import { createHash } from "node:crypto"
 
 export async function POST(
   request: Request,
@@ -40,6 +41,7 @@ export async function POST(
     }
 
     const buffer = Buffer.from(await fileData.arrayBuffer())
+    const contentHash = createHash("sha256").update(buffer).digest("hex")
     const parsed = await parsePDF(buffer)
     const chunks = chunkPages(parsed.pages)
 
@@ -48,14 +50,18 @@ export async function POST(
     }
 
     const serviceClient = await createServiceClient()
-
-    await serviceClient
-      .from("embeddings")
-      .delete()
-      .eq("document_id", documentId)
-
     const texts = chunks.map((c) => c.content)
     const embeddings = await generateEmbeddings(texts, googleApiKey)
+
+    // Finish the expensive embedding step before replacing the current index.
+    // A quota/provider failure then leaves the existing document searchable.
+    await serviceClient.from("documents").update({
+      content_hash: contentHash,
+      page_count: parsed.pageCount,
+      summary_status: "processing",
+    }).eq("id", documentId)
+
+    await serviceClient.from("embeddings").delete().eq("document_id", documentId)
 
     const embeddingRows = chunks.map((chunk, i) => ({
       document_id: documentId,
@@ -79,7 +85,20 @@ export async function POST(
       stored += batch.length
     }
 
-    return NextResponse.json({ chunks: chunks.length, embeddings: stored })
+    let summaryStatus: "ready" | "failed" = "failed"
+    try {
+      const response = await fetch(`${process.env.SOCRA_BACKEND_URL || "http://localhost:8000"}/documents/${documentId}/summarize`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pages: parsed.pages, course_id: doc.course_id, content_hash: contentHash, google_api_key: googleApiKey }),
+        signal: AbortSignal.timeout(120_000),
+      })
+      summaryStatus = response.ok ? "ready" : "failed"
+    } catch (error) {
+      console.warn("Summary regeneration deferred:", error)
+    }
+    await serviceClient.from("documents").update({ summary_status: summaryStatus }).eq("id", documentId)
+
+    return NextResponse.json({ chunks: chunks.length, embeddings: stored, summaryStatus })
   } catch (error) {
     console.error("Re-embed error:", error)
     return NextResponse.json(

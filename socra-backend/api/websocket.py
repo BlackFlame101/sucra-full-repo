@@ -6,12 +6,22 @@ Protocol::
         "message":   str,
         "courseId":  uuid,
         "sessionId": uuid,
-        "apiKey":    str | null,    # optional - overrides server GEMINI_API_KEY
-        "model":     str | null,    # optional - overrides server default model
+        "apiKey":    str | null,    # optional - provider API key override
+        "provider":  str | null,    # google (default) or xai
+        "model":     str | null,    # optional - overrides provider default model
+        "mode":      str | null,    # socratic (default) or exercise
+        "action":    str | null,    # message (default), submit_attempt, reveal_solution
+        "exerciseId": str | null,  # required for attempt/reveal actions
+        "answer":   str | null,    # required for submit_attempt
+        "accessToken": str | null,  # required for exercise mode ownership checks
     }
     server -> client:  { "type": "diagnostic", "content": DiagnosticReport }   (first turn only)
                        { "type": "token",      "content": "<partial text>" }   (many)
                        { "type": "context",    "content": EvaluationResult }   (when applicable)
+                       { "type": "exercise",   "content": PublicExercise }      (exercise mode)
+                       { "type": "explanation", "content": GeneratedExplanation } (explain mode)
+                       { "type": "correction", "content": PublicCorrection }   (after attempt)
+                       { "type": "solution",   "content": PublicSolution }     (after attempt + explicit reveal)
                        { "type": "done" }                                       (always)
                        { "type": "error",      "content": "<message>" }        (on failure)
 """
@@ -22,13 +32,23 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from agents.tuteur_socratique import TUTEUR_LLM_TAG
 from db import messages as messages_db
 from db import profiles as profiles_db
+from db.attempts import (
+    get_exercise_for_owner,
+    get_latest_attempt_for_owner,
+    get_latest_exercise_for_owner,
+    has_revealed_solution,
+    reveal_solution_for_owner,
+)
 from db.diagnostics import get_course_id_for_session
+from db.supabase_client import get_supabase
 from graph.orchestrator import get_compiled_graph
 from graph.state import ChatTurn, SocraState
+from models.schemas import ExerciseActionRequest, ExerciseAttemptRequest
 
 
 router = APIRouter(tags=["chat"])
@@ -46,6 +66,8 @@ def _build_initial_state(
     is_first_message: bool,
     api_key: str = "",
     model: str = "",
+    provider: str = "google",
+    mode: str = "socratic",
 ) -> SocraState:
     state: SocraState = {
         "session_id": session_id,
@@ -53,6 +75,10 @@ def _build_initial_state(
         "user_id": user_id,
         "messages": history,
         "student_message": student_message,
+        "mode": mode,
+        "language": "fr" if any(ch in student_message.lower() for ch in "éèêàçùôîû") or any(
+            token in f" {student_message.lower()} " for token in (" je ", " est ", " les ", " des ", " pourquoi ", " comment ", "dans ")
+        ) else "en",
         "is_first_message": is_first_message,
         "profile": {
             "session_id": session_id,
@@ -62,17 +88,49 @@ def _build_initial_state(
             "misconception_history": (profile or {}).get("misconception_history") or [],
             "bloom_progression": (profile or {}).get("bloom_progression") or [],
             "total_exchanges": int((profile or {}).get("total_exchanges") or 0),
+            "exercise_performance": (profile or {}).get("exercise_performance") or [],
         },
     }
     if api_key:
         state["api_key"] = api_key
     if model:
         state["model"] = model
+    if provider:
+        state["provider"] = provider
     return state
 
 
 async def _send(ws: WebSocket, payload: dict[str, Any]) -> None:
     await ws.send_text(json.dumps(payload, default=str))
+
+
+def _display_message(display_text: Any, student_message: str) -> str:
+    """Use a concise client label for internal actions while retaining normal text."""
+    if isinstance(display_text, str) and display_text.strip():
+        return display_text.strip()[:500]
+    return student_message[:500]
+
+
+def _authenticate_exercise_request(session_id: str, course_id: str, access_token: str) -> str:
+    """Authenticate and verify ownership before exposing course-derived work."""
+    if not access_token:
+        raise ValueError("Sign in again to generate an exercise.")
+    auth_user = get_supabase().auth.get_user(access_token).user
+    if not auth_user:
+        raise ValueError("Your session has expired. Sign in again.")
+    session = (
+        get_supabase().table("sessions").select("course_id")
+        .eq("id", session_id).single().execute()
+    ).data
+    if not session or str(session.get("course_id")) != course_id:
+        raise ValueError("This inquiry does not belong to the selected course.")
+    course = (
+        get_supabase().table("courses").select("user_id")
+        .eq("id", course_id).single().execute()
+    ).data
+    if not course or str(course.get("user_id")) != str(auth_user.id):
+        raise ValueError("You do not have access to this course.")
+    return str(auth_user.id)
 
 
 @router.websocket("/ws/chat/{session_id}")
@@ -115,25 +173,174 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 await _send(ws, {"type": "error", "content": "Invalid JSON"})
                 continue
 
-            student_message = (payload.get("message") or "").strip()
-            course_id = (payload.get("courseId") or course_id_resolved or "").strip()
+            action = str(payload.get("action") or "message").strip().lower()
+            if action not in ("message", "submit_attempt", "reveal_solution", "restore_exercise"):
+                await _send(ws, {"type": "error", "content": "Unsupported chat action"})
+                continue
+            student_message = (
+                str(payload.get("answer") or "").strip()
+                if action == "submit_attempt"
+                else str(payload.get("message") or "").strip()
+            )
+            display_message = _display_message(payload.get("displayText"), student_message)
+            attempt_request = None
+            if action == "submit_attempt":
+                try:
+                    attempt_request = ExerciseAttemptRequest.model_validate({
+                        "exercise_id": payload.get("exerciseId"),
+                        "answer": payload.get("answer"),
+                        "hints_used": payload.get("hintsUsed", 0),
+                    })
+                    student_message = attempt_request.answer
+                except ValidationError:
+                    await _send(ws, {"type": "error", "content": "Enter an answer under 10,000 characters and choose a valid exercise."})
+                    continue
+            course_id = str(payload.get("courseId") or course_id_resolved or "").strip()
             user_id = user_id_resolved or ""
+            requested_mode = str(payload.get("mode") or "socratic").strip().lower()
+            if requested_mode not in ("socratic", "exercise", "explain"):
+                await _send(ws, {"type": "error", "content": "Unsupported learning mode"})
+                continue
+            if action != "message" and requested_mode != "exercise":
+                await _send(ws, {"type": "error", "content": "Exercise actions require Short Answer Practice mode"})
+                continue
+            if requested_mode in ("exercise", "explain"):
+                try:
+                    user_id = _authenticate_exercise_request(
+                        session_id,
+                        course_id,
+                        str(payload.get("accessToken") or "").strip(),
+                    )
+                except ValueError as exc:
+                    await _send(ws, {"type": "error", "content": str(exc)})
+                    continue
+                except Exception:
+                    logger.exception("Learning mode authorization lookup failed")
+                    await _send(ws, {"type": "error", "content": "Could not verify access to this course. Please try again."})
+                    continue
 
-            # Per-request LLM overrides from the Settings dialog. Only Google /
-            # Gemini is wired through right now (other providers are disabled
-            # in the frontend); the keys are NOT logged.
-            client_api_key = (payload.get("apiKey") or "").strip()
-            client_model = (payload.get("model") or "").strip()
-            client_provider = (payload.get("provider") or "").strip().lower()
-            # Defensive: only honour overrides if the provider is explicitly
-            # google. An OpenAI / Anthropic key would be useless against the
-            # Gemini SDK and would just produce confusing 401s.
-            if client_provider and client_provider != "google":
+            if action == "restore_exercise":
+                try:
+                    latest_exercise = get_latest_exercise_for_owner(
+                        session_id=session_id,
+                        course_id=course_id,
+                        user_id=user_id,
+                    )
+                    if latest_exercise:
+                        exercise_data = latest_exercise.get("exercise_data") or {}
+                        await _send(ws, {"type": "exercise", "content": {
+                            "id": latest_exercise["id"],
+                            "concept": latest_exercise["concept"],
+                            "difficulty": latest_exercise["difficulty"],
+                            "bloom_level": latest_exercise["bloom_level"],
+                            "prompt": latest_exercise["prompt"],
+                            "citations": latest_exercise["citations"],
+                            "hints": latest_exercise["hints"],
+                            "exercise_type": latest_exercise.get("exercise_type") or "short_answer",
+                            "choices": exercise_data.get("choices") or [],
+                            "numeric_unit": exercise_data.get("numeric_unit") or "",
+                        }})
+                        latest_attempt = get_latest_attempt_for_owner(
+                            exercise_id=str(latest_exercise["id"]),
+                            session_id=session_id,
+                            user_id=user_id,
+                        )
+                        if latest_attempt:
+                            await _send(ws, {"type": "correction", "content": {
+                                "attempt_id": latest_attempt["id"],
+                                "total_score": latest_attempt["total_score"],
+                                "max_score": latest_attempt["max_score"],
+                                "overall_feedback": latest_attempt["feedback"],
+                                "error_category": latest_attempt["error_category"],
+                                "criterion_feedback": latest_attempt["criterion_feedback"],
+                                "citations": latest_attempt["citations"],
+                                "next_step": latest_attempt["next_step"],
+                                "hints_used": latest_attempt["hints_used"],
+                            }})
+                            if latest_attempt.get("solution_revealed"):
+                                await _send(ws, {"type": "solution", "content": {
+                                    "exercise_id": latest_exercise["id"],
+                                    "expected_answer": latest_exercise["expected_answer"],
+                                    "common_mistakes": latest_exercise.get("common_mistakes") or [],
+                                }})
+                except Exception:
+                    logger.exception("Failed to restore exercise for session %s", session_id)
+                    await _send(ws, {"type": "error", "content": "Could not restore the saved exercise."})
+                    continue
+                await _send(ws, {"type": "done"})
+                continue
+
+            exercise_id = str(payload.get("exerciseId") or "").strip()
+            exercise_record: dict[str, Any] | None = None
+            if action == "submit_attempt" and attempt_request:
+                exercise_id = str(attempt_request.exercise_id)
+            elif action == "reveal_solution":
+                try:
+                    exercise_id = str(ExerciseActionRequest.model_validate({"exercise_id": exercise_id}).exercise_id)
+                except ValidationError:
+                    await _send(ws, {"type": "error", "content": "Choose a valid exercise before revealing the solution."})
+                    continue
+
+            if action == "reveal_solution":
+                try:
+                    solution = reveal_solution_for_owner(
+                        exercise_id=exercise_id,
+                        session_id=session_id,
+                        course_id=course_id,
+                        user_id=user_id,
+                    )
+                except ValueError as exc:
+                    await _send(ws, {"type": "error", "content": str(exc)})
+                    continue
+                except Exception:
+                    logger.exception("Failed to reveal exercise solution")
+                    await _send(ws, {"type": "error", "content": "Could not reveal the solution. Please try again."})
+                    continue
+                try:
+                    messages_db.merge_latest_assistant_metadata(session_id, {"solution": solution})
+                except Exception:
+                    logger.exception("Failed to persist revealed solution snapshot")
+                await _send(ws, {"type": "solution", "content": solution})
+                await _send(ws, {"type": "done"})
+                continue
+
+            if action == "submit_attempt":
+                try:
+                    exercise_record = get_exercise_for_owner(
+                        exercise_id=exercise_id,
+                        session_id=session_id,
+                        course_id=course_id,
+                        user_id=user_id,
+                    )
+                    revealed = has_revealed_solution(
+                        exercise_id=exercise_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                    )
+                except Exception:
+                    logger.exception("Failed to load exercise for submitted attempt")
+                    await _send(ws, {"type": "error", "content": "Could not load this exercise. Please try again."})
+                    continue
+                if not exercise_record:
+                    await _send(ws, {"type": "error", "content": "This exercise is not available in the selected inquiry."})
+                    continue
+                if revealed:
+                    await _send(ws, {"type": "error", "content": "The solution has been revealed, so this exercise can no longer be submitted."})
+                    continue
+
+            # Per-request LLM overrides from the Settings dialog. Keys are
+            # never logged; only explicitly supported providers are honored.
+            client_api_key = str(payload.get("apiKey") or "").strip()
+            client_model = str(payload.get("model") or "").strip()
+            client_provider = str(payload.get("provider") or "").strip().lower()
+            if client_provider not in ("google", "xai"):
                 client_api_key = ""
                 client_model = ""
+                client_provider = "google"
 
             if not student_message:
-                await _send(ws, {"type": "error", "content": "Empty message"})
+                message = "Write an answer before submitting it." if action == "submit_attempt" else "Empty message"
+                await _send(ws, {"type": "error", "content": message})
                 continue
             if not course_id:
                 await _send(ws, {"type": "error", "content": "Missing course_id"})
@@ -142,10 +349,22 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             # First message of the session = no prior assistant turns.
             is_first_message = not any(m["role"] == "assistant" for m in history)
 
+            if is_first_message and action == "message":
+                try:
+                    messages_db.set_default_session_title_from_prompt(session_id, student_message)
+                except Exception:
+                    # Naming is helpful, but must never prevent a learning turn.
+                    logger.exception("Failed to name inquiry from its first prompt")
+
             # Persist the user message before invoking the graph so it survives
             # any crash and is visible to subsequent turns.
             try:
-                messages_db.save_message(session_id, "user", student_message)
+                messages_db.save_message(
+                    session_id,
+                    "user",
+                    display_message,
+                    metadata={"learning_mode": requested_mode},
+                )
             except Exception as exc:
                 logger.exception("Failed to save user message: %s", exc)
 
@@ -161,10 +380,18 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 is_first_message=is_first_message,
                 api_key=client_api_key,
                 model=client_model,
+                provider=client_provider or "google",
+                mode="correct" if action == "submit_attempt" else requested_mode,
             )
+            if action == "submit_attempt":
+                initial_state["exercise_record"] = exercise_record or {}
+                initial_state["student_answer"] = student_message
+                initial_state["hints_used"] = attempt_request.hints_used if attempt_request else 0
 
             assistant_text_parts: list[str] = []
             final_state: SocraState = initial_state
+            exercise_result: dict[str, Any] | None = None
+            correction_result: dict[str, Any] | None = None
             sent_diagnostic = False
 
             try:
@@ -202,6 +429,23 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                                 await _send(ws, {"type": "diagnostic", "content": diag})
                                 sent_diagnostic = True
 
+                        if name == "exercise_generator" and isinstance(data_out, dict):
+                            exercise = data_out.get("exercise")
+                            if exercise:
+                                exercise_result = exercise
+                                await _send(ws, {"type": "exercise", "content": exercise})
+
+                        if name == "explicateur" and isinstance(data_out, dict):
+                            explanation = data_out.get("explanation")
+                            if explanation:
+                                await _send(ws, {"type": "explanation", "content": explanation})
+
+                        if name == "correcteur" and isinstance(data_out, dict):
+                            correction = data_out.get("correction")
+                            if correction:
+                                correction_result = correction
+                                await _send(ws, {"type": "correction", "content": correction})
+
                         # The whole graph finishing — capture the final state.
                         if name in ("LangGraph", "__start__") and isinstance(data_out, dict):
                             final_state = data_out  # type: ignore[assignment]
@@ -217,6 +461,16 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             # back to the state's ``streamed_response``.
             # --------------------------------------------------------------
             assistant_text = "".join(assistant_text_parts).strip()
+            generated = final_state.get("exercise") or exercise_result
+            explanation_result = final_state.get("explanation")
+            if requested_mode == "exercise" and action == "message" and generated:
+                assistant_text = f"Exercise ready: {generated.get('concept', 'your topic')}."
+            if requested_mode == "explain" and action == "message":
+                assistant_text = "Course explanation ready."
+            if action == "submit_attempt":
+                correction = final_state.get("correction") or correction_result or {}
+                if correction:
+                    assistant_text = f"You scored {correction.get('total_score', 0)} out of {correction.get('max_score', 10)}. Review your feedback below."
             if not assistant_text:
                 assistant_text = (
                     (final_state.get("streamed_response") or "").strip()
@@ -236,7 +490,22 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             # Persist the assistant message and bump the session.
             try:
                 if assistant_text:
-                    messages_db.save_message(session_id, "assistant", assistant_text)
+                    # Persist only public mode payloads. Exercise answer/rubric
+                    # remain private in the exercises table.
+                    public_metadata: dict[str, Any] = {"learning_mode": requested_mode}
+                    if generated:
+                        public_metadata["exercise"] = generated
+                    if correction_result or final_state.get("correction"):
+                        correction = final_state.get("correction") or correction_result or {}
+                        public_metadata["correction"] = correction
+                        public_metadata["exercise_id"] = exercise_id
+                    if explanation_result:
+                        public_metadata["explanation"] = explanation_result
+                    # Save text and its card snapshot atomically in one row;
+                    # do not depend on an insert response returning an ID.
+                    messages_db.save_message(
+                        session_id, "assistant", assistant_text, metadata=public_metadata
+                    )
                     history = [*history, {"role": "assistant", "content": assistant_text}]
                 messages_db.touch_session(session_id)
             except Exception as exc:

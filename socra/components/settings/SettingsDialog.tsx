@@ -33,11 +33,9 @@ import { useUserSettings, type ApiKeys, type ModelPref } from "@/hooks/useUserSe
 import { toast } from "sonner"
 
 
-// Only Google / Gemini is wired through to the Python backend right now.
-// OpenAI and Anthropic stay in the UI (so we don't lose the design) but are
-// disabled with an informational tooltip.
-const SUPPORTED_PROVIDERS: ReadonlySet<Provider> = new Set<Provider>(["google"])
-const COMING_SOON_TOOLTIP = "Coming soon — only Gemini is wired to the tutor backend in this build."
+// Gemini and xAI Grok are wired through to the Python backend.
+const SUPPORTED_PROVIDERS: ReadonlySet<Provider> = new Set<Provider>(["google", "xai"])
+const COMING_SOON_TOOLTIP = "Coming soon — this provider is not wired to the tutor backend yet."
 
 interface SettingsDialogProps {
   open: boolean
@@ -67,10 +65,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   }, [open, apiKeys, modelPref])
 
   const hasAnyKey = Object.values(draftKeys).some((k) => k && k.trim().length > 0)
-
-  const availableProviders = PROVIDERS.filter(
-    (p) => draftKeys[p.id]?.trim()
-  )
 
   const handleSave = () => {
     for (const provider of PROVIDERS) {
@@ -111,7 +105,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   const handleModelSelect = (value: string) => {
     const [provider, ...modelParts] = value.split(":")
-    const model = modelParts.join(":")
+    const selectedModel = modelParts.join(":")
+    const model = provider === "google" && selectedModel.startsWith("gemini-2.5-")
+      ? "gemini-3.5-flash-lite"
+      : selectedModel
     setDraftModel({ provider: provider as Provider, model })
   }
 
@@ -243,9 +240,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               <div className="flex items-start gap-2 rounded-lg bg-muted/50 border border-border/50 p-3">
                 <Info className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
                 <p className="text-xs text-muted-foreground">
-                  Add a Google Gemini API key above to choose a model. Without
-                  a key, the server uses its default Gemini 2.5 Flash-Lite key.
-                  Other providers will land in a future build.
+                  Add a Gemini or xAI Grok API key above to choose a model.
+                  Without a key, the server uses its default Gemini 3.5 Flash-Lite key.
                 </p>
               </div>
             )}

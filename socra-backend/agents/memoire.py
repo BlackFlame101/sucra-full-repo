@@ -52,6 +52,7 @@ def _ensure_profile_shape(p: dict | None, session_id: str, user_id: str) -> Stud
         "misconception_history": [],
         "bloom_progression": [],
         "total_exchanges": 0,
+        "exercise_performance": [],
     }
     if not p:
         return base
@@ -64,6 +65,8 @@ def _ensure_profile_shape(p: dict | None, session_id: str, user_id: str) -> Stud
         v = p.get(key)
         base[key] = v if isinstance(v, list) else []  # type: ignore[literal-required]
     base["total_exchanges"] = int(p.get("total_exchanges") or 0)
+    evidence = p.get("exercise_performance")
+    base["exercise_performance"] = evidence if isinstance(evidence, list) else []
     return base
 
 
@@ -106,6 +109,48 @@ def _apply_evaluation(
         "fragile_concepts": _dedup_capped(fragile, MAX_FRAGILE),
         "misconception_history": _dedup_capped(misc_history, MAX_MISCONCEPTION_HISTORY),
         "bloom_progression": bloom_hist[-MAX_BLOOM_HISTORY:],
+        "exercise_performance": list(profile.get("exercise_performance") or []),
+        "total_exchanges": int(profile.get("total_exchanges") or 0) + 1,
+    }
+
+
+def _apply_exercise_correction(
+    profile: StudentProfile,
+    correction: dict,
+    exercise: dict,
+) -> StudentProfile:
+    concept = str(exercise.get("concept") or "Short-answer exercise").strip()
+    total = int(correction.get("total_score") or 0)
+    maximum = max(1, int(correction.get("max_score") or 10))
+    ratio = total / maximum
+    mastered = list(profile.get("mastered_concepts") or [])
+    fragile = list(profile.get("fragile_concepts") or [])
+    if ratio >= MASTERY_THRESHOLD:
+        mastered.append(concept)
+        fragile = [item for item in fragile if item.casefold() != concept.casefold()]
+    elif ratio <= FRAGILE_THRESHOLD and all(item.casefold() != concept.casefold() for item in mastered):
+        fragile.append(concept)
+
+    bloom = exercise.get("bloom_level")
+    bloom_hist = list(profile.get("bloom_progression") or [])
+    if bloom:
+        bloom_hist.append(str(bloom))
+    evidence = list(profile.get("exercise_performance") or [])
+    evidence.append({
+        "exercise_id": str(exercise.get("id") or ""),
+        "concept": concept,
+        "total_score": total,
+        "max_score": maximum,
+        "error_category": correction.get("error_category"),
+        "hints_used": int(correction.get("hints_used") or 0),
+        "criterion_feedback": correction.get("criterion_feedback") or [],
+    })
+    return {
+        **profile,
+        "mastered_concepts": _dedup_capped(mastered, MAX_MASTERED),
+        "fragile_concepts": _dedup_capped(fragile, MAX_FRAGILE),
+        "bloom_progression": bloom_hist[-MAX_BLOOM_HISTORY:],
+        "exercise_performance": evidence[-30:],
         "total_exchanges": int(profile.get("total_exchanges") or 0) + 1,
     }
 
@@ -114,6 +159,7 @@ async def run_memoire(state: SocraState) -> SocraState:
     session_id = state.get("session_id", "")
     user_id = state.get("user_id", "")
     evaluation = state.get("evaluation") or {}
+    correction = state.get("correction") or {}
     tutor_signal = state.get("tutor_signal") or {}
     bloom_level = tutor_signal.get("bloom_level")
 
@@ -131,7 +177,14 @@ async def run_memoire(state: SocraState) -> SocraState:
             current_profile_dict = {}
 
     current_profile = _ensure_profile_shape(current_profile_dict, session_id, user_id)
-    updated_profile = _apply_evaluation(current_profile, evaluation, bloom_level=bloom_level)
+    if correction:
+        updated_profile = _apply_exercise_correction(
+            current_profile,
+            correction,
+            state.get("exercise_record") or {},
+        )
+    else:
+        updated_profile = _apply_evaluation(current_profile, evaluation, bloom_level=bloom_level)
 
     try:
         profiles_db.upsert_profile(
@@ -142,6 +195,7 @@ async def run_memoire(state: SocraState) -> SocraState:
             misconception_history=updated_profile["misconception_history"],
             bloom_progression=updated_profile["bloom_progression"],
             total_exchanges=updated_profile["total_exchanges"],
+            exercise_performance=updated_profile["exercise_performance"],
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("memoire: failed to persist profile: %s", exc)

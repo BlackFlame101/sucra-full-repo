@@ -14,13 +14,13 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import type { Document, Session } from "@/types"
+import type { CourseSession, Document } from "@/types"
 
 interface SidebarProps {
   courseName: string
   courseId: string
   documents: Document[]
-  sessions: Session[]
+  sessions: CourseSession[]
   currentSessionId?: string
   onNewInquiry: () => void
   onSettingsOpen?: () => void
@@ -48,7 +48,7 @@ export function Sidebar({
     }
   }, [editingId])
 
-  const startEditing = (session: Session) => {
+  const startEditing = (session: CourseSession) => {
     setEditingId(session.id)
     setEditValue(session.title || "Untitled")
   }
@@ -108,7 +108,7 @@ export function Sidebar({
         </Button>
       </div>
 
-      <ScrollArea className="flex-1 px-4">
+      <ScrollArea className="flex-1 min-w-0 px-4">
         {/* Resources Section */}
         <div className="py-3">
           <h3 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">
@@ -134,11 +134,11 @@ export function Sidebar({
         </div>
 
         {/* Recent Inquiries Section */}
-        <div className="py-3 border-t border-border/30">
+        <div className="w-full min-w-0 py-3 border-t border-border/30">
           <h3 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">
             Recent Inquiries
           </h3>
-          <div className="space-y-0.5">
+          <div className="w-full min-w-0 space-y-0.5">
             {sessions.length === 0 ? (
               <p className="text-xs text-muted-foreground/60 py-2">
                 No inquiries yet
@@ -184,15 +184,17 @@ export function Sidebar({
                 return (
                   <div
                     key={session.id}
-                    className={`group/session flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors ${
+                    className={`group/session grid w-full min-w-0 box-border grid-cols-[minmax(0,1fr)_2rem] items-center gap-1 rounded-md px-2 py-1.5 text-xs transition-colors ${
                       isActive
                         ? "bg-secondary/15 text-secondary font-medium"
                         : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                     }`}
                   >
                     <Link
-                      href={`/dashboard/course/${courseId}/inquiry/${session.id}`}
-                      className="flex items-center gap-2 min-w-0 flex-1"
+                      href={session.exam_id
+                        ? `/dashboard/course/${courseId}/exam/${session.id}?restore=1`
+                        : `/dashboard/course/${courseId}/inquiry/${session.id}`}
+                      className="flex min-w-0 items-center gap-2 overflow-hidden"
                     >
                       <MessageCircle
                         className={`h-3.5 w-3.5 shrink-0 ${
@@ -207,9 +209,12 @@ export function Sidebar({
                           e.stopPropagation()
                           startEditing(session)
                         }}
-                        className="opacity-0 group-hover/session:opacity-100 p-0.5 text-muted-foreground hover:text-foreground shrink-0 transition-opacity"
+                        type="button"
+                        aria-label={`Rename ${session.title || "inquiry"}`}
+                        title="Rename inquiry"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground opacity-0 shadow-sm transition-all hover:border-tertiary/50 hover:bg-tertiary/15 hover:text-tertiary group-hover/session:opacity-100 focus-visible:border-tertiary/50 focus-visible:bg-tertiary/15 focus-visible:text-tertiary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tertiary/70"
                       >
-                        <Pencil className="h-3 w-3" />
+                        <Pencil className="h-4 w-4" />
                       </button>
                     )}
                   </div>

@@ -24,13 +24,22 @@ from langgraph.graph import END, START, StateGraph
 from graph.nodes import (
     diagnostiqueur_node,
     evaluateur_node,
+    exercise_generator_node,
+    correcteur_node,
+    explicateur_node,
     memoire_node,
     tuteur_socratique_node,
 )
 from graph.state import SocraState
 
 
-def _route_entry(state: SocraState) -> Literal["diagnostiqueur", "tuteur_socratique"]:
+def _route_entry(state: SocraState) -> Literal["diagnostiqueur", "tuteur_socratique", "exercise_generator", "correcteur", "explicateur"]:
+    if state.get("mode") == "correct":
+        return "correcteur"
+    if state.get("mode") == "exercise":
+        return "exercise_generator"
+    if state.get("mode") == "explain":
+        return "explicateur"
     return "diagnostiqueur" if state.get("is_first_message") else "tuteur_socratique"
 
 
@@ -46,6 +55,9 @@ def build_graph():
     g.add_node("tuteur_socratique", tuteur_socratique_node)
     g.add_node("evaluateur", evaluateur_node)
     g.add_node("memoire", memoire_node)
+    g.add_node("exercise_generator", exercise_generator_node)
+    g.add_node("correcteur", correcteur_node)
+    g.add_node("explicateur", explicateur_node)
 
     g.add_conditional_edges(
         START,
@@ -53,8 +65,15 @@ def build_graph():
         {
             "diagnostiqueur": "diagnostiqueur",
             "tuteur_socratique": "tuteur_socratique",
+            "exercise_generator": "exercise_generator",
+            "correcteur": "correcteur",
+            "explicateur": "explicateur",
         },
     )
+
+    g.add_edge("exercise_generator", END)
+    g.add_edge("explicateur", END)
+    g.add_edge("correcteur", "memoire")
 
     g.add_edge("diagnostiqueur", "tuteur_socratique")
 

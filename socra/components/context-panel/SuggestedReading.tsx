@@ -37,26 +37,26 @@ export function SuggestedReading({ readings, isLoading }: SuggestedReadingProps)
           Reading suggestions will appear based on your discussion
         </p>
       ) : (
-        <div className="space-y-3 min-w-0">
+        <div className="w-full min-w-0 space-y-3">
           {readings.map((reading, i) => (
             <div
               key={i}
-              className="rounded-xl border border-border/50 bg-card/50 p-3 hover:bg-card/70 transition-colors min-w-0"
+              className="box-border w-full min-w-0 overflow-hidden rounded-xl border border-border/50 bg-card/50 p-3 hover:bg-card/70 transition-colors"
             >
-              <div className="flex items-start gap-2.5 min-w-0">
+              <div className="flex w-full min-w-0 items-start gap-2.5">
                 <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-secondary/10 mt-0.5">
                   <BookOpen className="h-3.5 w-3.5 text-secondary" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-2 min-w-0">
-                    <p className="text-sm font-medium truncate min-w-0">{reading.section}</p>
+                  <div className="flex w-full min-w-0 items-center justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-medium" title={reading.section}>{reading.section}</p>
                     {reading.chapter && (
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground shrink-0">
                         {reading.chapter}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                  <p className="mt-0.5 max-w-full truncate text-xs text-muted-foreground" title={reading.documentName}>
                     {reading.documentName}
                     {reading.pageNumber ? ` \u00B7 Page ${reading.pageNumber}` : ""}
                   </p>

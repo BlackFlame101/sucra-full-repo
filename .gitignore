@@ -1,2 +1,9 @@
-scope.md
-scope2.md
+# Local planning notes
+/scope*.md
+/extension-plan.md
+/socra-backend/tests/PHASE6_CHECKLIST.md
+
+# Local credentials (keep example templates trackable)
+.env
+.env.*
+!.env.example

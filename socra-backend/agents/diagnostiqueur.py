@@ -6,14 +6,13 @@ Workflow::
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.llm import get_chat_llm
+from agents.structured_output import parse_json_object
 from db import diagnostics as diag_db
 from graph.state import DiagnosticReport, SocraState
 from prompts.diagnostiqueur_prompt import SYSTEM_PROMPT, USER_TEMPLATE
@@ -21,23 +20,6 @@ from rag.retriever import format_chunks_for_prompt, retrieve_chunks
 
 
 logger = logging.getLogger(__name__)
-
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _coerce_json(raw: str) -> dict[str, Any]:
-    """Best-effort extraction of a JSON object from an LLM response."""
-    text = raw.strip()
-    fence = _JSON_FENCE_RE.search(text)
-    if fence:
-        text = fence.group(1)
-    else:
-        first = text.find("{")
-        last = text.rfind("}")
-        if first != -1 and last != -1 and last > first:
-            text = text[first : last + 1]
-    return json.loads(text)
 
 
 def _fallback_report(topic: str, reason: str) -> DiagnosticReport:
@@ -95,19 +77,22 @@ async def run_diagnostiqueur(state: SocraState) -> SocraState:
         streaming=False,
         api_key=state.get("api_key"),
         model=state.get("model"),
+        provider=state.get("provider"),
     )
     messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=f"{SYSTEM_PROMPT}\n\nNON-NEGOTIABLE LANGUAGE RULE: Write every field in {'French' if (state.get('language') or '').lower().startswith('fr') else 'English'} except the topic name when it is a proper noun."),
         HumanMessage(content=USER_TEMPLATE.format(topic=topic, course_context=context)),
     ]
 
+    used_fallback = False
     try:
         result = await llm.ainvoke(messages)
-        raw = result.content if isinstance(result.content, str) else str(result.content)
-        report = _normalise_report(_coerce_json(raw), topic)
-    except json.JSONDecodeError as exc:
-        report = _fallback_report(topic, f"json-decode: {exc}")
+        report = _normalise_report(parse_json_object(result.content), topic)
+    except (ValueError, TypeError) as exc:
+        used_fallback = True
+        report = _fallback_report(topic, f"invalid-model-output: {exc}")
     except Exception as exc:  # pragma: no cover - defensive
+        used_fallback = True
         logger.exception("Diagnostiqueur LLM call failed: %s", exc)
         report = _fallback_report(topic, f"llm-error: {exc}")
 
@@ -126,6 +111,10 @@ async def run_diagnostiqueur(state: SocraState) -> SocraState:
     return {
         **state,
         "diagnostic": report,
+        "agent_issues": [
+            *(state.get("agent_issues") or []),
+            *([{"agent": "diagnostiqueur", "kind": "fallback"}] if used_fallback else []),
+        ],
         "retrieved_chunks": chunks,
         "current_node": "diagnostiqueur",
     }

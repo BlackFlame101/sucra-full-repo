@@ -10,7 +10,6 @@ so they survive page reloads.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -18,6 +17,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.llm import get_chat_llm
+from agents.structured_output import parse_json_object
 from db.supabase_client import get_supabase
 from graph.state import ChatTurn, EvaluationResult, SocraState, SuggestedReadingItem
 from prompts.evaluateur_prompt import SYSTEM_PROMPT, USER_TEMPLATE
@@ -25,22 +25,6 @@ from rag.retriever import retrieve_chunks
 
 
 logger = logging.getLogger(__name__)
-
-
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
-
-
-def _coerce_json(raw: str) -> dict[str, Any]:
-    text = (raw or "").strip()
-    fence = _JSON_FENCE_RE.search(text)
-    if fence:
-        text = fence.group(1)
-    else:
-        first = text.find("{")
-        last = text.rfind("}")
-        if first != -1 and last != -1 and last > first:
-            text = text[first : last + 1]
-    return json.loads(text)
 
 
 def _format_history(messages: list[ChatTurn], limit: int = 8) -> str:
@@ -69,6 +53,43 @@ def _format_excerpts(chunks: list[dict[str, Any]]) -> str:
             f"[{i}] document_id={doc_id} | filename={fname} | page={page}\n    {snippet}"
         )
     return "\n".join(lines)
+
+
+_STOP_TERMS = {
+    "about", "after", "also", "because", "before", "between", "could",
+    "does", "from", "have", "into", "just", "more", "most", "other",
+    "over", "same", "some", "such", "than", "that", "their", "them",
+    "then", "there", "these", "they", "this", "those", "through", "what",
+    "when", "where", "which", "while", "with", "would", "your", "what",
+    "dans", "avec", "pour", "mais", "donc", "comme", "cette", "cela",
+    "être", "avoir", "plus", "tout", "tous", "elle", "elles", "nous",
+    "vous", "leur", "leurs", "qui", "que", "quoi", "comment", "pourquoi",
+}
+
+
+def _fallback_key_terms(
+    chunks: list[dict[str, Any]],
+) -> list[str]:
+    """Conservative fallback terms from course excerpts, never tutor prose."""
+    text = " ".join(str(c.get("content") or "") for c in chunks[:3])
+    candidates = re.findall(r"\b[A-Za-zÀ-ÖØ-öø-ÿ][\wÀ-ÖØ-öø-ÿ-]{3,}\b", text, flags=re.UNICODE)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        term = " ".join(candidate.split()).strip(" -.,:;!?()[]{}")
+        words = term.lower().split()
+        if not term or len(words) > 1 or all(w in _STOP_TERMS for w in words):
+            continue
+        if sum(len(w) > 2 and w not in _STOP_TERMS for w in words) == 0:
+            continue
+        key = term.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        terms.append(term)
+        if len(terms) == 5:
+            break
+    return terms
 
 
 def _normalise_evaluation(
@@ -186,25 +207,42 @@ async def run_evaluateur(state: SocraState) -> SocraState:
         streaming=False,
         api_key=state.get("api_key"),
         model=state.get("model"),
+        provider=state.get("provider"),
     )
 
+    used_fallback = False
     try:
         result = await llm.ainvoke(
             [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_prompt)]
         )
-        raw = result.content if isinstance(result.content, str) else str(result.content)
-        evaluation = _normalise_evaluation(_coerce_json(raw), chunks)
-    except json.JSONDecodeError as exc:
+        data = parse_json_object(result.content)
+        evaluation = _normalise_evaluation(data, chunks)
+        if not evaluation.get("key_terms"):
+            used_fallback = True
+    except (ValueError, TypeError) as exc:
+        used_fallback = True
         logger.warning("Évaluateur JSON parse failed (%s); using empty evaluation", exc)
         evaluation = _normalise_evaluation({}, chunks)
     except Exception as exc:  # pragma: no cover - defensive
+        used_fallback = True
         logger.exception("Évaluateur LLM call failed: %s", exc)
         evaluation = _normalise_evaluation({}, chunks)
+
+    if not evaluation.get("key_terms"):
+        fallback_terms = _fallback_key_terms(chunks)
+        if fallback_terms:
+            evaluation["key_terms"] = fallback_terms
+    if used_fallback:
+        evaluation["used_fallback"] = True  # type: ignore[typeddict-unknown-key]
 
     _persist_key_terms(session_id, evaluation.get("key_terms") or [])
 
     return {
         **state,
+        "agent_issues": [
+            *(state.get("agent_issues") or []),
+            *([{"agent": "evaluateur", "kind": "fallback"}] if used_fallback else []),
+        ],
         "evaluation": evaluation,
         "current_node": "evaluateur",
     }

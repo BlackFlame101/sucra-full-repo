@@ -69,6 +69,13 @@ def _infer_bloom(tutor_response: str) -> BloomLevel:
     return "understand"
 
 
+def _infer_language(text: str) -> str:
+    """Small deterministic language hint for the tutor prompt."""
+    lowered = (text or "").lower()
+    french_markers = ("é", "è", "ê", "à", "ç", " je ", " est ", " les ", " des ", " pourquoi ", " comment ", "dans ")
+    return "French" if any(marker in lowered for marker in french_markers) else "English"
+
+
 # ---------------------------------------------------------------------------
 # Prompt assembly
 # ---------------------------------------------------------------------------
@@ -90,7 +97,10 @@ def _format_history(messages: Iterable[ChatTurn]) -> list[SystemMessage | HumanM
 def _build_context_block(state: SocraState, course_context: str) -> str:
     diag = state.get("diagnostic") or {}
     profile = state.get("profile") or {}
+    language_code = (state.get("language") or "").lower()
+    language = "French" if language_code.startswith("fr") else "English" if language_code.startswith("en") else _infer_language(state.get("student_message") or "")
     return CONTEXT_TEMPLATE.format(
+        response_language=language,
         topic=diag.get("topic") or "(not yet determined)",
         initial_level=diag.get("initial_level") or "(unknown)",
         identified_gaps=", ".join(diag.get("identified_gaps") or []) or "(none recorded)",
@@ -132,13 +142,17 @@ async def run_tuteur(state: SocraState) -> SocraState:
         streaming=True,
         api_key=state.get("api_key"),
         model=state.get("model"),
+        provider=state.get("provider"),
     ).with_config(
         tags=[TUTEUR_LLM_TAG],
         run_name="tuteur_socratique",
     )
 
     messages: list = [
-        SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=(
+            f"{SYSTEM_PROMPT}\n\nNON-NEGOTIABLE LANGUAGE RULE: Reply only in "
+            f"{'French' if (state.get('language') or '').lower().startswith('fr') else 'English' if state.get('language') else _infer_language(student_message)}."
+        )),
         SystemMessage(content=context_block),
         *_format_history(history),
     ]
@@ -181,6 +195,10 @@ async def run_tuteur(state: SocraState) -> SocraState:
 
     return {
         **state,
+        "agent_issues": [
+            *(state.get("agent_issues") or []),
+            *([{"agent": "tuteur_socratique", "kind": "fallback"}] if error is not None else []),
+        ],
         "tutor_signal": signal,
         "streamed_response": response_text,
         "retrieved_chunks": chunks,

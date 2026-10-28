@@ -23,6 +23,10 @@ export type EmbeddingInsert = TablesInsert<"embeddings">
 export type EmbeddingUpdate = TablesUpdate<"embeddings">
 
 export type Session = Tables<"sessions">
+export type CourseSession = Session & {
+  exam_id?: string
+  exam_status?: "in_progress" | "completed"
+}
 export type SessionInsert = TablesInsert<"sessions">
 export type SessionUpdate = TablesUpdate<"sessions">
 

@@ -17,6 +17,7 @@ class Settings(BaseModel):
         default_factory=lambda: os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     )
     gemini_api_key: str = Field(default_factory=lambda: os.environ["GEMINI_API_KEY"])
+    xai_api_key: str = Field(default_factory=lambda: os.environ.get("XAI_API_KEY", ""))
 
     backend_port: int = Field(
         default_factory=lambda: int(os.environ.get("BACKEND_PORT", "8000"))
@@ -29,11 +30,10 @@ class Settings(BaseModel):
     )
 
     # Model configuration.
-    # gemini-2.5-flash-lite has a much higher free-tier daily quota (1000+/day)
-    # than gemini-2.5-flash (~20/day) which is essential for development.
-    # Users can override with their own API key via the Settings dialog and
-    # pick gemini-2.5-flash / gemini-2.5-pro per request.
-    chat_model: str = "gemini-2.5-flash-lite"
+    # The default can be overridden per request from the Settings dialog.
+    chat_model: str = Field(
+        default_factory=lambda: os.environ.get("CHAT_MODEL", "gemini-3.5-flash-lite")
+    )
     # text-embedding-004 was retired April 2026. We use gemini-embedding-001
     # truncated to 768 dims (Matryoshka) so it lines up with the vector(768)
     # column in public.embeddings. Existing chunks need re-embedding to fully

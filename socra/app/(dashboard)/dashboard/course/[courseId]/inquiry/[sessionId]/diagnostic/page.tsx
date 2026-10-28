@@ -24,10 +24,14 @@ import {
   ArrowRight,
   BookOpen,
   Compass,
+  ClipboardCheck,
   Loader2,
+  MessageCircleQuestionMark,
+  PanelsTopLeft,
   Sparkles,
 } from "lucide-react"
 import { toast } from "sonner"
+import { createClient } from "@/lib/supabase/client"
 
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -39,9 +43,40 @@ import {
 } from "@/lib/socra-ws"
 import { useUserSettings } from "@/hooks/useUserSettings"
 import type { Document, Course } from "@/types"
+import type { LearningMode } from "@/lib/socra-ws"
 
 
 type Phase = "picking" | "thinking" | "diagnosed" | "ready" | "error"
+
+const learningModes: Array<{
+  id: LearningMode
+  title: string
+  description: string
+  detail: string
+  Icon: typeof Compass
+}> = [
+  {
+    id: "socratic",
+    title: "Socratic Dialogue",
+    description: "Think it through with a tutor",
+    detail: "A short diagnostic sets your starting point, then Socra guides you with course-grounded questions.",
+    Icon: MessageCircleQuestionMark,
+  },
+  {
+    id: "explain",
+    title: "Explain a Topic",
+    description: "Get a clear, cited explanation",
+    detail: "Ask about a topic and get a direct explanation grounded in your uploaded course pages.",
+    Icon: PanelsTopLeft,
+  },
+  {
+    id: "exercise",
+    title: "Practice Exercises",
+    description: "Try a course-based question",
+    detail: "Ask for a short-answer, multiple-choice, or numerical question grounded in your course.",
+    Icon: ClipboardCheck,
+  },
+]
 
 
 export default function DiagnosticPage() {
@@ -52,9 +87,11 @@ export default function DiagnosticPage() {
   const [course, setCourse] = useState<Course | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
   const [topic, setTopic] = useState("")
+  const [learningMode, setLearningMode] = useState<LearningMode>("socratic")
   const [phase, setPhase] = useState<Phase>("picking")
   const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null)
   const [tutorOpening, setTutorOpening] = useState("")
+  const [modeResultReady, setModeResultReady] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const { getActiveConfig } = useUserSettings()
@@ -87,7 +124,7 @@ export default function DiagnosticPage() {
           const msgs = await msgsRes.json()
           if (Array.isArray(msgs) && msgs.length > 0) {
             // Already has history — skip diagnostic.
-            router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}`)
+            router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}`)
           }
         }
       } catch {
@@ -99,7 +136,7 @@ export default function DiagnosticPage() {
     return () => {
       cancelled = true
     }
-  }, [courseId, sessionId, router])
+  }, [courseId, sessionId, router, learningMode])
 
   // Tear down the socket on unmount or before navigation away.
   useEffect(() => {
@@ -153,18 +190,35 @@ export default function DiagnosticPage() {
     wsRef.current = ws
 
     ws.addEventListener("open", () => {
-      const cfg = getActiveConfig()
-      const forwardKey = cfg.provider === "google" ? cfg : undefined
-      ws.send(
-        JSON.stringify({
-          message: trimmed,
-          courseId,
-          sessionId,
-          ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
-          ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
-          ...(forwardKey?.model ? { model: forwardKey.model } : {}),
-        })
-      )
+      void (async () => {
+        try {
+          const cfg = getActiveConfig()
+          const forwardKey = cfg.provider === "google" || cfg.provider === "xai" ? cfg : undefined
+          let accessToken: string | undefined
+          if (learningMode === "exercise" || learningMode === "explain") {
+            const { data, error } = await createClient().auth.getSession()
+            if (error || !data.session?.access_token) {
+              throw new Error("Sign in again before requesting course-based practice or explanations.")
+            }
+            accessToken = data.session.access_token
+          }
+          if (ws.readyState !== WebSocket.OPEN) return
+          ws.send(JSON.stringify({
+            message: trimmed,
+            courseId,
+            sessionId,
+            mode: learningMode,
+            ...(accessToken ? { accessToken } : {}),
+            ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
+            ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
+            ...(forwardKey?.model ? { model: forwardKey.model } : {}),
+          }))
+        } catch (err) {
+          setErrorMessage(err instanceof Error ? err.message : "Could not start this learning mode.")
+          setPhase("error")
+          ws.close()
+        }
+      })()
     })
 
     ws.addEventListener("error", () => {
@@ -183,6 +237,10 @@ export default function DiagnosticPage() {
         case "diagnostic":
           setDiagnostic(parsed.content)
           setPhase("diagnosed")
+          break
+        case "exercise":
+        case "explanation":
+          setModeResultReady(true)
           break
         case "token":
           setTutorOpening((prev) => prev + parsed.content)
@@ -210,7 +268,7 @@ export default function DiagnosticPage() {
   }
 
   const handleContinue = () => {
-    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}`)
+    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}`)
   }
 
   const handleStartOver = () => {
@@ -221,6 +279,7 @@ export default function DiagnosticPage() {
     setPhase("picking")
     setDiagnostic(null)
     setTutorOpening("")
+    setModeResultReady(false)
     setErrorMessage(null)
   }
 
@@ -245,30 +304,70 @@ export default function DiagnosticPage() {
           className="border-tertiary/30 bg-tertiary/10 text-tertiary text-[10px] uppercase tracking-widest mb-4"
         >
           <Sparkles className="h-3 w-3 mr-1.5" />
-          Diagnostic
+          {learningMode === "socratic" ? "Socratic Diagnostic" : learningMode === "explain" ? "Explain a Topic" : "Practice Exercises"}
         </Badge>
         <h1 className="font-serif text-3xl sm:text-4xl font-medium tracking-tight mb-3">
-          Before we begin, let&apos;s see where you stand.
+          {learningMode === "socratic" ? "Before we begin, let's see where you stand." : learningMode === "explain" ? "Let's explore your topic." : "Let's practice with your course material."}
         </h1>
         <p className="text-muted-foreground text-sm sm:text-base max-w-2xl leading-relaxed">
-          A short diagnostic will set the right starting point for our dialogue.
-          Tell me what you want to explore, and the tutor will open with a
-          question grounded in your own course material.
+          {learningMode === "socratic"
+            ? "A short diagnostic will set the right starting point for our dialogue. Tell me what you want to explore, and the tutor will open with a question grounded in your course material."
+            : learningMode === "explain"
+              ? "Tell me what you want to understand. The Explicateur will answer your request directly using your course and cite its source pages."
+              : "Tell me what you want to practice. Ask explicitly for multiple-choice or numerical questions; otherwise Socra creates short-answer practice from your course."}
         </p>
       </div>
 
       {/* Picking phase */}
       {phase === "picking" && (
-        <PickingPanel
-          topic={topic}
-          onTopicChange={setTopic}
-          onSubmit={() => beginDiagnostic(topic)}
-          suggestions={suggestions}
-          onPickSuggestion={(s) => {
-            setTopic(s)
-            beginDiagnostic(s)
-          }}
-        />
+        <div className="space-y-5">
+          <div>
+            <p className="mb-3 text-sm font-medium">Choose how you want to study</p>
+            <div role="group" aria-label="Learning mode" className="grid gap-3 md:grid-cols-3">
+              {learningModes.map(({ id, title, description, Icon }) => {
+                const selected = learningMode === id
+                return (
+                  <button
+                    key={id}
+                    id={`learning-mode-${id}`}
+                    type="button"
+                    aria-pressed={selected}
+                    onClick={() => setLearningMode(id)}
+                    className={`min-h-28 rounded-xl border p-4 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-secondary/70 ${
+                      selected
+                        ? "border-secondary bg-secondary/10 shadow-sm ring-1 ring-secondary/40"
+                        : "border-border/60 bg-card/40 hover:border-secondary/40 hover:bg-card"
+                    }`}
+                  >
+                    <span className="mb-3 flex items-center gap-2">
+                      <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${selected ? "bg-secondary/15 text-secondary" : "bg-muted text-muted-foreground"}`}>
+                        <Icon className="h-4 w-4" />
+                      </span>
+                      {id === "socratic" && <span className="text-[9px] font-semibold uppercase tracking-wider text-secondary">Default</span>}
+                    </span>
+                    <span className="block text-sm font-semibold">{title}</span>
+                    <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">{description}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <p aria-live="polite" className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              {learningModes.find((mode) => mode.id === learningMode)?.detail}
+              {learningMode === "socratic" && " Practice and Explain answer directly without the diagnostic."}
+            </p>
+          </div>
+          <PickingPanel
+            topic={topic}
+            onTopicChange={setTopic}
+            onSubmit={() => beginDiagnostic(topic)}
+            buttonLabel={learningMode === "socratic" ? "Begin diagnostic" : learningMode === "explain" ? "Explain this topic" : "Create a practice question"}
+            suggestions={suggestions}
+            onPickSuggestion={(s) => {
+              setTopic(s)
+              beginDiagnostic(s)
+            }}
+          />
+        </div>
       )}
 
       {/* Thinking / diagnosed / ready phases */}
@@ -276,13 +375,20 @@ export default function DiagnosticPage() {
         <div className="space-y-6">
           <PromptEcho text={topic} />
 
-          <DiagnosticCard diagnostic={diagnostic} loading={phase === "thinking"} />
-
-          <TutorOpeningCard
-            text={tutorOpening}
-            visible={phase === "diagnosed" || phase === "ready"}
-            streaming={phase === "diagnosed"}
-          />
+          {learningMode === "socratic" ? (
+            <>
+              <DiagnosticCard diagnostic={diagnostic} loading={phase === "thinking"} />
+              <TutorOpeningCard text={tutorOpening} visible={phase === "diagnosed" || phase === "ready"} streaming={phase === "diagnosed"} />
+            </>
+          ) : (
+            <div className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
+              {phase === "thinking"
+                ? learningMode === "explain" ? "Preparing your course-grounded explanation…" : "Preparing your verified practice question…"
+                : modeResultReady
+                  ? learningMode === "explain" ? "Your explanation is ready. Continue to view it with its course citations." : "Your practice question is ready. Continue to view it."
+                  : "Your selected learning mode is processing your request."}
+            </div>
+          )}
 
           <div className="flex items-center justify-between gap-3 pt-2">
             <Button variant="ghost" size="sm" onClick={handleStartOver}>
@@ -293,7 +399,7 @@ export default function DiagnosticPage() {
               disabled={phase !== "ready"}
               onClick={handleContinue}
             >
-              {phase === "ready" ? "Continue Inquiry" : "Preparing your tutor..."}
+              {phase === "ready" ? learningMode === "socratic" ? "Continue Inquiry" : learningMode === "explain" ? "View Explanation" : "View Practice" : "Preparing your response..."}
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
@@ -309,7 +415,11 @@ export default function DiagnosticPage() {
             </div>
             <div className="space-y-1">
               <h3 className="font-medium text-foreground">
-                Diagnostic could not complete
+                {learningMode === "exercise"
+                  ? "Practice question could not be created"
+                  : learningMode === "explain"
+                    ? "Explanation could not be prepared"
+                    : "Diagnostic could not complete"}
               </h3>
               <p className="text-sm text-muted-foreground">
                 {errorMessage || "An unknown error occurred."}
@@ -325,7 +435,7 @@ export default function DiagnosticPage() {
               variant="ghost"
               onClick={() => {
                 if (errorMessage) toast.warning("Skipping diagnostic")
-                router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}`)
+    router.push(learningMode === "socratic" ? `/dashboard/course/${courseId}/inquiry/${sessionId}` : `/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}`)
               }}
             >
               Skip and open inquiry
@@ -348,12 +458,14 @@ function PickingPanel({
   onSubmit,
   suggestions,
   onPickSuggestion,
+  buttonLabel,
 }: {
   topic: string
   onTopicChange: (s: string) => void
   onSubmit: () => void
   suggestions: string[]
   onPickSuggestion: (s: string) => void
+  buttonLabel: string
 }) {
   return (
     <div className="space-y-6">
@@ -388,7 +500,7 @@ function PickingPanel({
             onClick={onSubmit}
           >
             <Sparkles className="h-3.5 w-3.5" />
-            Begin diagnostic
+            {buttonLabel}
           </Button>
         </div>
       </div>

@@ -2,7 +2,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createAnthropic } from "@ai-sdk/anthropic"
 
-export type Provider = "google" | "openai" | "anthropic"
+export type Provider = "google" | "openai" | "anthropic" | "xai"
 
 export interface ModelConfig {
   provider?: Provider
@@ -28,7 +28,7 @@ export const PROVIDERS: ProviderInfo[] = [
     id: "google",
     label: "Google Gemini",
     models: [
-      { id: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash-Lite" },
+      { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite (default)" },
       { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
       { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
       { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
@@ -58,9 +58,19 @@ export const PROVIDERS: ProviderInfo[] = [
     keyPlaceholder: "sk-ant-...",
     keyPrefix: "sk-ant-",
   },
+  {
+    id: "xai",
+    label: "xAI Grok",
+    models: [
+      { id: "grok-4.7", label: "Grok 4.7" },
+      { id: "grok-4.6", label: "Grok 4.6" },
+    ],
+    keyPlaceholder: "xai-...",
+    keyPrefix: "xai-",
+  },
 ]
 
-const DEFAULT_MODEL = "gemini-2.5-flash"
+const DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
 export function resolveModel(config?: ModelConfig) {
   if (!config?.apiKey) {
@@ -78,6 +88,11 @@ export function resolveModel(config?: ModelConfig) {
       return createAnthropic({ apiKey: config.apiKey })(
         config.model ?? "claude-sonnet-4-20250514"
       )
+    case "xai":
+      return createOpenAI({
+        apiKey: config.apiKey,
+        baseURL: "https://api.x.ai/v1",
+      })(config.model ?? "grok-4.7")
     case "google":
     default:
       return createGoogleGenerativeAI({ apiKey: config.apiKey })(

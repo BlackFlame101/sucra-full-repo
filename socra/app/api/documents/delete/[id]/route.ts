@@ -32,6 +32,7 @@ export async function DELETE(
   // Delete embeddings first (service client to bypass RLS)
   const serviceClient = await createServiceClient()
   await serviceClient.from("embeddings").delete().eq("document_id", id)
+  await serviceClient.from("document_summaries").delete().eq("document_id", id)
 
   // Delete file from storage
   await supabase.storage

@@ -82,6 +82,7 @@ extra questions on the first turn.
 
 
 CONTEXT_TEMPLATE = """### Diagnostic
+- Required response language: {response_language}. Use only this language.
 - Topic: {topic}
 - Initial level: {initial_level}
 - Identified gaps: {identified_gaps}

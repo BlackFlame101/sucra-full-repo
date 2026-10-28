@@ -12,6 +12,9 @@ import logging
 
 from agents.diagnostiqueur import run_diagnostiqueur
 from agents.evaluateur import run_evaluateur
+from agents.exercise_generator import run_exercise_generator
+from agents.correcteur import run_correcteur
+from agents.explicateur import run_explicateur
 from agents.memoire import run_memoire
 from agents.tuteur_socratique import run_tuteur
 from graph.state import SocraState
@@ -34,3 +37,15 @@ async def evaluateur_node(state: SocraState) -> SocraState:
 
 async def memoire_node(state: SocraState) -> SocraState:
     return await run_memoire(state)
+
+
+async def exercise_generator_node(state: SocraState) -> SocraState:
+    return await run_exercise_generator(state)
+
+
+async def correcteur_node(state: SocraState) -> SocraState:
+    return await run_correcteur(state)
+
+
+async def explicateur_node(state: SocraState) -> SocraState:
+    return await run_explicateur(state)

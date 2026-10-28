@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
+import { proxyExamRequest } from "@/lib/server/exam-proxy"
 
 export async function GET(
   _request: Request,
@@ -25,5 +26,21 @@ export async function GET(
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json(sessions)
+  const examsResponse = await proxyExamRequest(
+    `/exams/course/${encodeURIComponent(courseId)}/sessions`,
+    "GET",
+  )
+  const examPayload: unknown = examsResponse.ok ? await examsResponse.json() : []
+  const exams = Array.isArray(examPayload) ? examPayload as Array<{
+    id: string
+    session_id: string
+    status: "in_progress" | "completed"
+  }> : []
+  const examBySession = new Map(exams.map((exam) => [exam.session_id, exam]))
+  return NextResponse.json((sessions ?? []).map((session) => {
+    const exam = examBySession.get(session.id)
+    return exam
+      ? { ...session, exam_id: exam.id, exam_status: exam.status }
+      : session
+  }))
 }

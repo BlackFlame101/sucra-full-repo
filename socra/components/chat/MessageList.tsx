@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef } from "react"
+import type { ReactNode } from "react"
 import { Message } from "./Message"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Bot } from "lucide-react"
@@ -10,6 +10,7 @@ interface MessageListProps {
   messages: UIMessage[]
   isLoading?: boolean
   status?: string
+  renderAfterMessage?: (message: UIMessage) => ReactNode
 }
 
 function getMessageText(message: UIMessage): string {
@@ -75,13 +76,7 @@ function EmptyState() {
   )
 }
 
-export function MessageList({ messages, isLoading, status }: MessageListProps) {
-  const bottomRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, status])
-
+export function MessageList({ messages, isLoading, status, renderAfterMessage }: MessageListProps) {
   if (isLoading) return <MessageSkeleton />
   if (messages.length === 0) return <EmptyState />
 
@@ -97,16 +92,17 @@ export function MessageList({ messages, isLoading, status }: MessageListProps) {
   return (
     <div className="flex flex-col gap-6 p-4 sm:p-6">
       {messages.map((message) => (
-        <Message
-          key={message.id}
-          message={message}
-          isStreaming={
-            status === "streaming" && message.id === last?.id && message.role === "assistant"
-          }
-        />
+        <div key={message.id} className="contents">
+          <Message
+            message={message}
+            isStreaming={
+              status === "streaming" && message.id === last?.id && message.role === "assistant"
+            }
+          />
+          {renderAfterMessage?.(message)}
+        </div>
       ))}
       {showTypingIndicator && <TypingIndicator />}
-      <div ref={bottomRef} />
     </div>
   )
 }

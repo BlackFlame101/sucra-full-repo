@@ -27,6 +27,7 @@ def upsert_profile(
     misconception_history: list[str] | None = None,
     bloom_progression: list[str] | None = None,
     total_exchanges: int | None = None,
+    exercise_performance: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session_id,
@@ -42,6 +43,8 @@ def upsert_profile(
         payload["bloom_progression"] = bloom_progression
     if total_exchanges is not None:
         payload["total_exchanges"] = total_exchanges
+    if exercise_performance is not None:
+        payload["exercise_performance"] = exercise_performance
 
     res = (
         get_supabase()

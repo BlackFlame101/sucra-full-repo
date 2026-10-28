@@ -15,11 +15,17 @@
  */
 import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react"
 import type { UIMessage } from "ai"
+import { createClient } from "@/lib/supabase/client"
 import {
   buildChatWsUrl,
   parseServerMessage,
   type DiagnosticReport,
   type EvaluationResult,
+  type LearningMode,
+  type PublicCorrection,
+  type PublicExercise,
+  type PublicExplanation,
+  type PublicSolution,
 } from "@/lib/socra-ws"
 
 // Mirrors the @ai-sdk/react `useChat` status union so existing UI (ChatInput,
@@ -29,11 +35,15 @@ export type ChatStatus = "ready" | "connecting" | "submitted" | "streaming" | "e
 interface UseSocraChatOpts {
   sessionId: string
   courseId: string
-  /** Optional per-request LLM config from the Settings dialog. Only Google
-   *  provider is forwarded to the backend; others are silently ignored. */
+  /** Optional per-request LLM config from the Settings dialog. Google and xAI
+   *  are forwarded to the backend; other providers are not yet supported there. */
   llmConfig?: { apiKey?: string; provider?: string; model?: string }
   onDiagnostic?: (d: DiagnosticReport) => void
   onContext?: (e: EvaluationResult) => void
+  onExercise?: (e: PublicExercise) => void
+  onExplanation?: (e: PublicExplanation) => void
+  onCorrection?: (e: PublicCorrection) => void
+  onSolution?: (e: PublicSolution) => void
   onError?: (err: Error) => void
 }
 
@@ -41,7 +51,10 @@ interface UseSocraChatReturn {
   messages: UIMessage[]
   status: ChatStatus
   error: Error | null
-  sendMessage: (m: { text: string }) => void
+  sendMessage: (m: { text: string; displayText?: string; mode?: LearningMode }) => void
+  submitAttempt: (attempt: { exerciseId: string; answer: string; hintsUsed: number }) => void
+  revealSolution: (exerciseId: string) => void
+  restoreExercise: () => void
   setMessages: Dispatch<SetStateAction<UIMessage[]>>
   regenerate: () => void
   /** Force-close the underlying socket. Mostly useful for tests. */
@@ -85,8 +98,17 @@ function appendToLastAssistantText(messages: UIMessage[], chunk: string): UIMess
   return [...messages.slice(0, -1), { ...last, parts: newParts } as UIMessage]
 }
 
+function attachAssistantMetadata(messages: UIMessage[], key: string, value: unknown): UIMessage[] {
+  const index = messages.findLastIndex((message) => message.role === "assistant")
+  if (index < 0) return messages
+  const next = [...messages]
+  const target = next[index] as UIMessage & { metadata?: Record<string, unknown> }
+  next[index] = { ...target, metadata: { ...target.metadata, [key]: value } } as UIMessage
+  return next
+}
+
 export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
-  const { sessionId, courseId, llmConfig, onDiagnostic, onContext, onError } = opts
+  const { sessionId, courseId, llmConfig, onDiagnostic, onContext, onExercise, onExplanation, onCorrection, onSolution, onError } = opts
 
   const [messages, setMessages] = useState<UIMessage[]>([])
   // Start in "ready" so the chat input is enabled right away — the WS only
@@ -96,14 +118,25 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
 
   const socketRef = useRef<WebSocket | null>(null)
   const lastUserTextRef = useRef<string>("")
-  const pendingMessageRef = useRef<string | null>(null)
+  const lastDisplayTextRef = useRef<string>("")
+  const lastModeRef = useRef<LearningMode>("socratic")
+  const pendingMessageRef = useRef<{ text: string; displayText: string; mode: LearningMode } | null>(null)
+  const turnInFlightRef = useRef(false)
   // Refs to avoid recreating the WS handlers on every render.
   const onDiagnosticRef = useRef(onDiagnostic)
   const onContextRef = useRef(onContext)
+  const onExerciseRef = useRef(onExercise)
+  const onExplanationRef = useRef(onExplanation)
+  const onCorrectionRef = useRef(onCorrection)
+  const onSolutionRef = useRef(onSolution)
   const onErrorRef = useRef(onError)
   const llmConfigRef = useRef(llmConfig)
   useEffect(() => { onDiagnosticRef.current = onDiagnostic }, [onDiagnostic])
   useEffect(() => { onContextRef.current = onContext }, [onContext])
+  useEffect(() => { onExerciseRef.current = onExercise }, [onExercise])
+  useEffect(() => { onExplanationRef.current = onExplanation }, [onExplanation])
+  useEffect(() => { onCorrectionRef.current = onCorrection }, [onCorrection])
+  useEffect(() => { onSolutionRef.current = onSolution }, [onSolution])
   useEffect(() => { onErrorRef.current = onError }, [onError])
   useEffect(() => { llmConfigRef.current = llmConfig }, [llmConfig])
 
@@ -182,11 +215,35 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
             onContextRef.current?.(msg.content)
             break
           }
+          case "exercise": {
+            onExerciseRef.current?.(msg.content)
+            setMessages((prev) => attachAssistantMetadata(prev, "exercise", msg.content))
+            setStatus("streaming")
+            break
+          }
+          case "explanation": {
+            onExplanationRef.current?.(msg.content)
+            setMessages((prev) => attachAssistantMetadata(prev, "explanation", msg.content))
+            setStatus("streaming")
+            break
+          }
+          case "correction": {
+            onCorrectionRef.current?.(msg.content)
+            setMessages((prev) => attachAssistantMetadata(prev, "correction", msg.content))
+            setStatus("streaming")
+            break
+          }
+          case "solution": {
+            onSolutionRef.current?.(msg.content)
+            break
+          }
           case "done": {
+            turnInFlightRef.current = false
             setStatus("ready")
             break
           }
           case "error": {
+            turnInFlightRef.current = false
             const e = new Error(msg.content || "Backend error")
             setStatus("error")
             setError(e)
@@ -202,38 +259,56 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
   // Public actions
   // ---------------------------------------------------------------------
   const sendMessage = useCallback(
-    (m: { text: string }) => {
+    (m: { text: string; displayText?: string; mode?: LearningMode }) => {
       const text = (m.text ?? "").trim()
-      if (!text) return
+      if (!text || turnInFlightRef.current) return
+      turnInFlightRef.current = true
+      const mode = m.mode ?? "socratic"
+      const displayText = (m.displayText ?? text).trim().slice(0, 500) || text.slice(0, 500)
       setError(null)
       lastUserTextRef.current = text
-      pendingMessageRef.current = text
+      lastDisplayTextRef.current = displayText
+      lastModeRef.current = mode
+      pendingMessageRef.current = { text, displayText, mode }
       setStatus("submitted")
-      setMessages((prev) => [...prev, makeUserMessage(text), makeAssistantStub()])
+      setMessages((prev) => [...prev, makeUserMessage(displayText), makeAssistantStub()])
 
       ensureSocket()
-        .then((ws) => {
+        .then(async (ws) => {
           const pending = pendingMessageRef.current
           if (pending == null) return
           pendingMessageRef.current = null
           const cfg = llmConfigRef.current
-          // Only forward the key if the user picked the Google provider —
-          // the backend ignores anything else, so we strip it client-side
-          // to avoid sending OpenAI/Anthropic keys over the wire.
-          const forwardKey = cfg?.provider === "google" ? cfg : undefined
+          // Only forward keys for providers supported by the Python backend.
+          const forwardKey = cfg?.provider === "google" || cfg?.provider === "xai" ? cfg : undefined
+          let accessToken: string | undefined
+          if (pending.mode === "exercise" || pending.mode === "explain") {
+            const { data, error: authError } = await createClient().auth.getSession()
+            if (authError || !data.session?.access_token) {
+              throw new Error("Sign in again before requesting course-based practice.")
+            }
+            accessToken = data.session.access_token
+          }
           ws.send(
             JSON.stringify({
-              message: pending,
+              message: pending.text,
+              ...(pending.displayText !== pending.text ? { displayText: pending.displayText } : {}),
               courseId,
               sessionId,
+              mode: pending.mode,
+              ...(accessToken ? { accessToken } : {}),
               ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
               ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
               ...(forwardKey?.model ? { model: forwardKey.model } : {}),
             })
           )
         })
-        .catch(() => {
-          // ensureSocket already updated status/error.
+        .catch((err: unknown) => {
+          turnInFlightRef.current = false
+          const e = err instanceof Error ? err : new Error("Could not send your message")
+          setStatus("error")
+          setError(e)
+          onErrorRef.current?.(e)
         })
     },
     [courseId, sessionId, ensureSocket]
@@ -248,8 +323,116 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
       const tail = prev[prev.length - 1]
       return tail.role === "assistant" ? prev.slice(0, -1) : prev
     })
-    sendMessage({ text: last })
+    sendMessage({ text: last, displayText: lastDisplayTextRef.current, mode: lastModeRef.current })
   }, [sendMessage])
+
+  const submitAttempt = useCallback(
+    ({ exerciseId, answer, hintsUsed }: { exerciseId: string; answer: string; hintsUsed: number }) => {
+      const trimmed = answer.trim()
+      if (!trimmed || !exerciseId || turnInFlightRef.current) return
+      let displayAnswer = trimmed
+      try {
+        const decoded: unknown = JSON.parse(trimmed)
+        if (Array.isArray(decoded) && decoded.every((value) => typeof value === "string")) {
+          displayAnswer = decoded.map((value, index) => `Blank ${index + 1}: ${value}`).join("\n")
+        }
+      } catch {
+        // Existing short-answer submissions are plain text.
+      }
+      turnInFlightRef.current = true
+      setError(null)
+      setStatus("submitted")
+      setMessages((prev) => [...prev, makeUserMessage(displayAnswer), makeAssistantStub()])
+      ensureSocket()
+        .then(async (ws) => {
+          const { data, error: authError } = await createClient().auth.getSession()
+          if (authError || !data.session?.access_token) {
+            throw new Error("Sign in again before submitting an answer.")
+          }
+          const cfg = llmConfigRef.current
+          const forwardKey = cfg?.provider === "google" || cfg?.provider === "xai" ? cfg : undefined
+          ws.send(JSON.stringify({
+            action: "submit_attempt",
+            exerciseId,
+            answer: trimmed,
+            ...(displayAnswer !== trimmed ? { displayText: displayAnswer } : {}),
+            hintsUsed,
+            courseId,
+            sessionId,
+            mode: "exercise",
+            accessToken: data.session.access_token,
+            ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
+            ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
+            ...(forwardKey?.model ? { model: forwardKey.model } : {}),
+          }))
+        })
+        .catch((err: unknown) => {
+          turnInFlightRef.current = false
+          const e = err instanceof Error ? err : new Error("Could not submit your answer")
+          setStatus("error")
+          setError(e)
+          onErrorRef.current?.(e)
+        })
+    },
+    [courseId, sessionId, ensureSocket]
+  )
+
+  const revealSolution = useCallback(
+    (exerciseId: string) => {
+      if (!exerciseId || turnInFlightRef.current) return
+      turnInFlightRef.current = true
+      setError(null)
+      setStatus("submitted")
+      ensureSocket()
+        .then(async (ws) => {
+          const { data, error: authError } = await createClient().auth.getSession()
+          if (authError || !data.session?.access_token) {
+            throw new Error("Sign in again before revealing the solution.")
+          }
+          ws.send(JSON.stringify({
+            action: "reveal_solution",
+            exerciseId,
+            courseId,
+            sessionId,
+            mode: "exercise",
+            accessToken: data.session.access_token,
+          }))
+        })
+        .catch((err: unknown) => {
+          turnInFlightRef.current = false
+          const e = err instanceof Error ? err : new Error("Could not reveal the solution")
+          setStatus("error")
+          setError(e)
+          onErrorRef.current?.(e)
+        })
+    },
+    [courseId, sessionId, ensureSocket]
+  )
+
+  const restoreExercise = useCallback(() => {
+    setError(null)
+    setStatus("submitted")
+    ensureSocket()
+      .then(async (ws) => {
+        const { data, error: authError } = await createClient().auth.getSession()
+        if (authError || !data.session?.access_token) {
+          throw new Error("Sign in again to restore this exercise.")
+        }
+        ws.send(JSON.stringify({
+          action: "restore_exercise",
+          courseId,
+          sessionId,
+          mode: "exercise",
+          accessToken: data.session.access_token,
+        }))
+      })
+      .catch((err: unknown) => {
+        const e = err instanceof Error ? err : new Error("Could not restore the exercise")
+        setStatus("error")
+        setError(e)
+        onErrorRef.current?.(e)
+      })
+  }, [courseId, sessionId, ensureSocket])
 
   const disconnect = useCallback(() => {
     const ws = socketRef.current
@@ -272,6 +455,9 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     status,
     error,
     sendMessage,
+    submitAttempt,
+    revealSolution,
+    restoreExercise,
     setMessages,
     regenerate,
     disconnect,

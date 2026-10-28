@@ -11,6 +11,7 @@ export interface ApiKeys {
   google?: string
   openai?: string
   anthropic?: string
+  xai?: string
 }
 
 export interface ModelPref {
@@ -42,7 +43,14 @@ export function useUserSettings() {
 
   useEffect(() => {
     setApiKeysState(readJson<ApiKeys>(KEYS_STORAGE_KEY, {}))
-    setModelPrefState(readJson<ModelPref | null>(MODEL_STORAGE_KEY, null))
+    const savedModel = readJson<ModelPref | null>(MODEL_STORAGE_KEY, null)
+    // Move saved Gemini 2.5 preferences to the requested 3.5 model. The key is
+    // kept exactly as stored; users can replace it in Settings if it is stale.
+    const model = savedModel?.provider === "google" && savedModel.model.startsWith("gemini-2.5-")
+      ? { provider: "google" as const, model: "gemini-3.5-flash-lite" }
+      : savedModel
+    if (model && model !== savedModel) localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(model))
+    setModelPrefState(model)
     setQuotaExceededState(localStorage.getItem(QUOTA_FLAG_KEY) === "true")
     setLoaded(true)
   }, [])

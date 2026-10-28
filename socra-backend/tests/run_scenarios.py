@@ -42,6 +42,8 @@ from tests.verifier import (  # noqa: E402
     check_asks_question_per_turn,
     check_conversation_resumable,
     check_diagnostic_topic,
+    check_agents_no_fallback,
+    check_response_language,
     check_key_terms_extracted,
     check_no_direct_answers,
     check_profile_updated,
@@ -137,6 +139,8 @@ async def run_one_turn(
     is_first_message: bool,
     api_key: str = "",
     model: str = "",
+    provider: str = "google",
+    language: str = "en",
 ) -> dict[str, Any]:
     """Invoke the graph for a single student turn and return the final state."""
     state: SocraState = {
@@ -145,6 +149,7 @@ async def run_one_turn(
         "user_id": user_id,
         "messages": history,
         "student_message": student_message,
+        "language": language,
         "is_first_message": is_first_message,
         "profile": {
             "session_id": session_id,
@@ -160,6 +165,8 @@ async def run_one_turn(
         state["api_key"] = api_key
     if model:
         state["model"] = model
+    if provider:
+        state["provider"] = provider
     final = await graph.ainvoke(state)
     return final
 
@@ -169,6 +176,7 @@ async def run_scenario(
     *,
     api_key: str = "",
     model: str = "",
+    provider: str = "google",
     inter_turn_delay: float = 0.0,
 ) -> ScenarioReport:
     """Drive one scenario from start to finish, then run the checklist."""
@@ -193,6 +201,7 @@ async def run_scenario(
     diagnostic_seen: dict[str, Any] | None = None
     tutor_responses: list[str] = []
     evaluations: list[dict[str, Any]] = []
+    agent_issues: list[dict[str, str]] = []
 
     for turn_idx, student_msg in enumerate(scenario["turns"]):
         is_first = turn_idx == 0
@@ -220,6 +229,8 @@ async def run_scenario(
                 is_first_message=is_first,
                 api_key=api_key,
                 model=model,
+                provider=provider,
+                language=scenario.get("language", "en"),
             )
             dt = time.perf_counter() - t0
         except Exception as exc:  # noqa: BLE001
@@ -231,6 +242,7 @@ async def run_scenario(
             diagnostic_seen = final.get("diagnostic") or {}
             print(f"   diagnostic.topic  = {diagnostic_seen.get('topic')!r}")
             print(f"   diagnostic.level  = {diagnostic_seen.get('initial_level')!r}")
+        agent_issues.extend(final.get("agent_issues") or [])
 
         signal = final.get("tutor_signal") or {}
         evaluation = final.get("evaluation")
@@ -274,6 +286,19 @@ async def run_scenario(
 
     # Final profile from DB (Mémoire writes there on its own).
     final_profile = profiles_db.get_profile(session_id) or profile
+    persisted_terms: list[str] = []
+    try:
+        term_res = (
+            get_supabase().table("key_terms").select("term")
+            .eq("session_id", session_id).execute()
+        )
+        persisted_terms = [
+            str(row.get("term") or "").strip()
+            for row in (term_res.data or [])
+            if str(row.get("term") or "").strip()
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to verify persisted key terms: %s", exc)
 
     # ------------------------------------------------------------------
     # Checklist
@@ -282,11 +307,16 @@ async def run_scenario(
         check_no_direct_answers(tutor_responses, scenario.get("forbidden_phrases")),
         check_asks_question_per_turn(tutor_responses),
         check_profile_updated(initial_profile, final_profile),
-        check_key_terms_extracted(evaluations),
+        check_key_terms_extracted(
+            [{"key_terms": persisted_terms}] if persisted_terms else []
+        ),
         check_suggested_readings_real_pages(evaluations),
         check_conversation_resumable(session_id, len(scenario["turns"])),
         check_diagnostic_topic(diagnostic_seen, scenario.get("expected_topic_keywords") or []),
+        check_agents_no_fallback(agent_issues),
+        check_response_language(tutor_responses, scenario.get("language", "en")),
     ]
+    checks[3].detail = "Persisted to key_terms: " + checks[3].detail
 
     # Pretty per-scenario summary
     print()
@@ -316,8 +346,8 @@ def render_report(reports: list[ScenarioReport]) -> str:
     lines.append("")
     lines.append("This report exercises the full multi-agent LangGraph pipeline")
     lines.append("(Diagnostiqueur → Tuteur Socratique → Évaluateur → Mémoire) against")
-    lines.append("five academic scenarios and validates the six-point checklist defined")
-    lines.append("in `scope2.md §11.2`.")
+    lines.append("academic scenarios and validates the required checklist defined")
+    lines.append("in `scope2.md §11.2`, plus fallback and response-language checks.")
     lines.append("")
 
     # Top-level summary table
@@ -414,6 +444,10 @@ async def main() -> int:
         default="",
     )
     parser.add_argument(
+        "--provider", choices=("google", "xai"), default="google",
+        help="Chat provider for this run (default: google).",
+    )
+    parser.add_argument(
         "--delay",
         help=(
             "Seconds to sleep between turns within a scenario (helps stay "
@@ -447,6 +481,7 @@ async def main() -> int:
                 scn,
                 api_key=args.api_key,
                 model=args.model,
+                provider=args.provider,
                 inter_turn_delay=args.delay,
             )
         except Exception as exc:  # noqa: BLE001

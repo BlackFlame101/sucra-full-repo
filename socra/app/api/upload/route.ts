@@ -5,6 +5,7 @@ import { chunkPages } from "@/lib/pdf/chunker"
 import { generateEmbeddings } from "@/lib/embeddings/generate"
 import { isQuotaError } from "@/lib/ai/model-resolver"
 import { NextResponse } from "next/server"
+import { createHash } from "node:crypto"
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
 
@@ -59,6 +60,31 @@ export async function POST(request: Request) {
     )
   }
 
+  let storagePath: string | null = null
+  let documentId: string | null = null
+  let serviceClient: Awaited<ReturnType<typeof createServiceClient>> | null = null
+
+  const rollbackUpload = async () => {
+    if (documentId && serviceClient) {
+      const embeddingsResult = await serviceClient.from("embeddings").delete().eq("document_id", documentId)
+      const summariesResult = await serviceClient.from("document_summaries").delete().eq("document_id", documentId)
+      const documentResult = await serviceClient.from("documents").delete().eq("id", documentId)
+      if (embeddingsResult.error) console.error("Upload rollback: embeddings cleanup failed", embeddingsResult.error)
+      if (summariesResult.error) console.error("Upload rollback: summaries cleanup failed", summariesResult.error)
+      if (documentResult.error) console.error("Upload rollback: document cleanup failed", documentResult.error)
+    } else if (documentId) {
+      const { error } = await supabase.from("documents").delete().eq("id", documentId)
+      if (error) console.error("Upload rollback: document cleanup failed", error)
+    }
+
+    if (storagePath) {
+      const { error } = await supabase.storage.from("documents").remove([storagePath])
+      if (error) console.error("Upload rollback: storage cleanup failed", error)
+    }
+    storagePath = null
+    documentId = null
+  }
+
   try {
     const arrayBuffer = await file.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
@@ -70,7 +96,7 @@ export async function POST(request: Request) {
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-zA-Z0-9._-]/g, "_")
       .replace(/_+/g, "_")
-    const storagePath = `${user.id}/${courseId}/${Date.now()}_${safeName}`
+    storagePath = `${user.id}/${courseId}/${Date.now()}_${safeName}`
     const { error: uploadError } = await supabase.storage
       .from("documents")
       .upload(storagePath, buffer, {
@@ -84,13 +110,14 @@ export async function POST(request: Request) {
 
     // 2. Parse PDF
     const parsed = await parsePDF(buffer)
+    const contentHash = createHash("sha256").update(buffer).digest("hex")
 
     // 3. Chunk text
     const chunks = chunkPages(parsed.pages)
 
     if (chunks.length === 0) {
       // Clean up uploaded file if no text could be extracted
-      await supabase.storage.from("documents").remove([storagePath])
+      await rollbackUpload()
       return NextResponse.json(
         { error: "Could not extract text from PDF. The file may be image-based or empty." },
         { status: 422 }
@@ -106,18 +133,20 @@ export async function POST(request: Request) {
         storage_path: storagePath,
         page_count: parsed.pageCount,
         file_size: file.size,
+        content_hash: contentHash,
+        summary_status: "processing",
       })
       .select()
       .single()
 
     if (docError) {
-      await supabase.storage.from("documents").remove([storagePath])
       throw new Error(`Document record creation failed: ${docError.message}`)
     }
+    documentId = document.id
 
     // 5. Generate embeddings and store them
     // Use service client for embedding inserts (bypasses RLS for batch operations)
-    const serviceClient = await createServiceClient()
+    serviceClient = await createServiceClient()
     let embeddingsStored = 0
 
     try {
@@ -152,25 +181,41 @@ export async function POST(request: Request) {
     } catch (embeddingError) {
       console.error("Embedding generation failed:", embeddingError)
       const quota = isQuotaError(embeddingError)
-      return NextResponse.json({
-        document,
-        chunks: chunks.length,
-        embeddings: 0,
-        ...(quota
-          ? { code: "QUOTA_EXCEEDED", warning: "API quota exceeded for embeddings. Configure your own Google API key in Settings." }
-          : { warning: embeddingError instanceof Error
-              ? embeddingError.message
-              : "Embedding generation failed. RAG will not work for this document until embeddings are generated." }),
-      }, { status: quota ? 429 : 201 })
+      await rollbackUpload()
+      if (quota) {
+        return NextResponse.json({
+          code: "QUOTA_EXCEEDED",
+          error: "Embedding quota exceeded. The PDF was removed because processing did not complete. Wait for the quota window to reset or check your Gemini project limits, then try again.",
+        }, { status: 429 })
+      }
+      throw embeddingError
     }
+
+    // Summary generation runs after source chunks are stored. Its failure is
+    // recorded for retry and never removes otherwise usable page citations.
+    let summaryStatus: "ready" | "failed" | "not_applicable" = "failed"
+    try {
+      const summaryResponse = await fetch(`${process.env.SOCRA_BACKEND_URL || "http://localhost:8000"}/documents/${document.id}/summarize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pages: parsed.pages, course_id: courseId, content_hash: contentHash, google_api_key: googleApiKey }),
+        signal: AbortSignal.timeout(120_000),
+      })
+      summaryStatus = summaryResponse.ok ? "ready" : "failed"
+    } catch (summaryError) {
+      console.warn("Course summary generation deferred:", summaryError)
+    }
+    await serviceClient.from("documents").update({ summary_status: summaryStatus }).eq("id", document.id)
 
     return NextResponse.json({
       document,
       chunks: chunks.length,
       embeddings: embeddingsStored,
+      summaryStatus,
     }, { status: 201 })
   } catch (error) {
     console.error("Upload pipeline error:", error)
+    await rollbackUpload()
     return NextResponse.json(
       {
         error:

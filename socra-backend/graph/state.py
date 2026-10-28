@@ -59,6 +59,7 @@ class EvaluationResult(TypedDict, total=False):
     key_terms: list[str]
     suggested_readings: list[SuggestedReadingItem]
     next_micro_objective: str
+    used_fallback: bool
 
 
 class StudentProfile(TypedDict, total=False):
@@ -71,6 +72,7 @@ class StudentProfile(TypedDict, total=False):
     misconception_history: list[str]
     bloom_progression: list[BloomLevel]
     total_exchanges: int
+    exercise_performance: list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +98,13 @@ class SocraState(TypedDict, total=False):
     # student configured their own Gemini API key in the frontend Settings).
     api_key: str
     model: str
+    provider: str
+    language: str
+    mode: Literal["socratic", "exercise", "explain", "correct"]
+    requested_difficulty: Literal["beginner", "intermediate", "advanced"]
+    exercise_record: dict[str, Any]
+    student_answer: str
+    hints_used: int
 
     # Flow control ----------------------------------------------------------
     is_first_message: bool
@@ -108,6 +117,9 @@ class SocraState(TypedDict, total=False):
     diagnostic: DiagnosticReport
     tutor_signal: TutorSignal
     evaluation: EvaluationResult
+    exercise: dict[str, Any]
+    correction: dict[str, Any]
+    explanation: dict[str, Any]
     profile: StudentProfile
 
     # Streaming buffer (filled token-by-token while Tuteur runs) -----------
@@ -115,3 +127,4 @@ class SocraState(TypedDict, total=False):
 
     # Errors ----------------------------------------------------------------
     error: str
+    agent_issues: list[dict[str, str]]

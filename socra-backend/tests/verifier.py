@@ -289,3 +289,28 @@ def check_diagnostic_topic(
         "FAIL",
         f"topic={diagnostic.get('topic')!r} did not match any of {expected_keywords}",
     )
+
+
+def check_agents_no_fallback(issues: list[dict[str, str]]) -> CheckResult:
+    """Fail runs where a core agent substituted a fallback response."""
+    if issues:
+        agents = ", ".join(sorted({item.get("agent", "unknown") for item in issues}))
+        return CheckResult("Core agents completed without fallback", "FAIL", f"fallback used by: {agents}")
+    return CheckResult("Core agents completed without fallback", "PASS", "no agent fallback recorded")
+
+
+def check_response_language(responses: list[str], expected: str) -> CheckResult:
+    """Check tutor replies for obvious language mismatches."""
+    expected = (expected or "en").lower()
+    french = expected.startswith("fr")
+    french_markers = (" le ", " la ", " les ", " des ", " est ", " pourquoi ", " comment ", " votre ", " pouvez-vous ", " dans ")
+    english_markers = (" the ", " is ", " are ", " what ", " why ", " how ", " your ", " could you ", " can you ", " in your ")
+    mismatches = []
+    for index, response in enumerate(responses, 1):
+        padded = f" {(response or '').lower()} "
+        expected_markers, other_markers = (french_markers, english_markers) if french else (english_markers, french_markers)
+        if sum(marker in padded for marker in expected_markers) == 0 and sum(marker in padded for marker in other_markers) >= 2:
+            mismatches.append(index)
+    if mismatches:
+        return CheckResult("Tutor follows scenario language", "FAIL", f"likely language mismatch on turn(s): {mismatches}")
+    return CheckResult("Tutor follows scenario language", "PASS", f"checked {len(responses)} turn(s), expected {'French' if french else 'English'}")

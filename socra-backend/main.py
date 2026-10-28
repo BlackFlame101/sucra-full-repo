@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import websocket as ws_routes
 from api.routes import health
+from api.routes import documents
+from api.routes import exams
 from config import get_settings
 
 
@@ -29,8 +31,9 @@ app = FastAPI(
     title="Socra Backend",
     version="0.1.0",
     description=(
-        "Multi-agent Socratic tutoring backend. FastAPI + LangGraph orchestrating "
-        "Diagnostiqueur, Tuteur Socratique, Évaluateur, and Mémoire agents."
+        "Multi-agent Socra tutoring backend. FastAPI + LangGraph orchestrating "
+        "Diagnostiqueur, Tuteur Socratique, Évaluateur, Générateur d'exercices, "
+        "Correcteur, and Mémoire agents."
     ),
 )
 
@@ -45,6 +48,8 @@ app.add_middleware(
 
 
 app.include_router(health.router)
+app.include_router(documents.router)
+app.include_router(exams.router)
 app.include_router(ws_routes.router)
 
 
