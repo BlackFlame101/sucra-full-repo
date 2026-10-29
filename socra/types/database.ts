@@ -9,6 +9,87 @@ export type Json =
 export type Database = {
   public: {
     Tables: {
+      library_items: {
+        Row: {
+          id: string
+          user_id: string
+          course_id: string
+          item_type: "explanation" | "exercise"
+          title: string
+          content: Json
+          source_document_id: string | null
+          source_page: number | null
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          course_id: string
+          item_type: "explanation" | "exercise"
+          title: string
+          content?: Json
+          source_document_id?: string | null
+          source_page?: number | null
+          created_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          course_id?: string
+          item_type?: "explanation" | "exercise"
+          title?: string
+          content?: Json
+          source_document_id?: string | null
+          source_page?: number | null
+          created_at?: string
+        }
+        Relationships: []
+      }
+      notebook_notes: {
+        Row: {
+          id: string
+          user_id: string
+          course_id: string | null
+          title: string
+          topic: string
+          content: string
+          source_type: "manual" | "explanation" | "exercise"
+          source_data: Json
+          source_document_id: string | null
+          source_page: number | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          course_id?: string | null
+          title: string
+          topic?: string
+          content?: string
+          source_type?: "manual" | "explanation" | "exercise"
+          source_data?: Json
+          source_document_id?: string | null
+          source_page?: number | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          course_id?: string | null
+          title?: string
+          topic?: string
+          content?: string
+          source_type?: "manual" | "explanation" | "exercise"
+          source_data?: Json
+          source_document_id?: string | null
+          source_page?: number | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       courses: {
         Row: {
           created_at: string

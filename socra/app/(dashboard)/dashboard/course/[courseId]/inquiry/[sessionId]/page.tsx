@@ -23,6 +23,25 @@ import type { UIMessage } from "ai"
 import type { LearningMode, PublicCorrection, PublicExercise, PublicSolution } from "@/lib/socra-ws"
 import type { PublicExplanation } from "@/lib/socra-ws"
 
+function explanationNoteText(explanation: PublicExplanation): string {
+  const lines = [`# ${explanation.definition}`, "", explanation.intuition, ""]
+  for (const section of explanation.sections ?? []) {
+    lines.push(`## ${section.heading}`, section.content)
+    if (section.code) lines.push(`\n\`\`\`${section.code_language || ""}\n${section.code}\n\`\`\``)
+    for (const item of section.walkthrough ?? []) lines.push(`\n\`\`\`\n${item.code}\n\`\`\`\n${item.explanation}`)
+    lines.push("")
+  }
+  if (explanation.course_example) lines.push("## Course example", explanation.course_example, "")
+  return lines.join("\n")
+}
+
+function exerciseNoteText(correction: PublicCorrection, solution: PublicSolution): string {
+  const lines = ["# Suggested answer", solution.expected_answer, "", "## Feedback", correction.overall_feedback]
+  for (const criterion of correction.criterion_feedback) lines.push(`\n### ${criterion.criterion} (${criterion.awarded_points}/${criterion.possible_points})`, criterion.feedback)
+  if (solution.common_mistakes.length) lines.push("\n## Common pitfalls", ...solution.common_mistakes.map((mistake) => `- ${mistake}`))
+  return lines.join("\n")
+}
+
 const ChatPanel = lazy(() =>
   import("@/components/chat/ChatPanel").then((m) => ({ default: m.ChatPanel }))
 )
@@ -395,6 +414,48 @@ export default function InquiryPage() {
     sendMessage({ text: question, mode: "socratic" })
   }
 
+  const saveLibraryItem = async (itemType: "explanation" | "exercise", title: string, content: Record<string, unknown>, sourceDocumentId?: string, sourcePage?: number) => {
+    const response = await fetch("/api/library", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_type: itemType, title, content: { ...content, session_id: sessionId }, course_id: courseId, source_document_id: sourceDocumentId, source_page: sourcePage }),
+    })
+    const payload = await response.json()
+    if (!response.ok) { toast.error("Could not save to Library", { description: payload.error }); return }
+    toast.success("Saved to Library")
+  }
+
+  const saveNotebookNote = async (title: string, content: string, sourceType: "explanation" | "exercise", sourceData: Record<string, unknown>, sourceDocumentId?: string, sourcePage?: number) => {
+    const response = await fetch("/api/notebook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, content, source_type: sourceType, source_data: { ...sourceData, session_id: sessionId }, course_id: courseId, source_document_id: sourceDocumentId, source_page: sourcePage }),
+    })
+    const payload = await response.json()
+    if (!response.ok) { toast.error("Could not add to Notebook", { description: payload.error }); return }
+    toast.success("Added to Notebook")
+  }
+
+  const handleSaveExplanationToLibrary = (value: PublicExplanation) => {
+    const source = value.citations[0]
+    void saveLibraryItem("explanation", value.sections?.[0]?.heading || value.definition.slice(0, 90), { explanation: value }, source?.document_id, source?.page_number ?? undefined)
+  }
+
+  const handleSaveExplanationToNotebook = (value: PublicExplanation) => {
+    const source = value.citations[0]
+    void saveNotebookNote(value.sections?.[0]?.heading || "Course explanation", explanationNoteText(value), "explanation", { explanation: value }, source?.document_id, source?.page_number ?? undefined)
+  }
+
+  const handleSaveExerciseToLibrary = (value: PublicCorrection, answer: PublicSolution) => {
+    const source = value.citations[0]
+    void saveLibraryItem("exercise", `Solved exercise ${answer.exercise_id.slice(0, 8)}`, { correction: value, solution: answer }, source?.document_id, source?.page_number ?? undefined)
+  }
+
+  const handleSaveExerciseToNotebook = (value: PublicCorrection, answer: PublicSolution) => {
+    const source = value.citations[0]
+    void saveNotebookNote(`Solved exercise ${answer.exercise_id.slice(0, 8)}`, exerciseNoteText(value, answer), "exercise", { correction: value, solution: answer }, source?.document_id, source?.page_number ?? undefined)
+  }
+
   const handleNewInquiry = async () => {
     try {
       const res = await fetch("/api/sessions", {
@@ -507,6 +568,10 @@ export default function InquiryPage() {
             onRevealSolution={handleRevealSolution}
             explanation={explanation}
             onDiscussExplanation={handleDiscussExplanation}
+            onSaveExplanationToLibrary={handleSaveExplanationToLibrary}
+            onSaveExplanationToNotebook={handleSaveExplanationToNotebook}
+            onSaveExerciseToLibrary={handleSaveExerciseToLibrary}
+            onSaveExerciseToNotebook={handleSaveExerciseToNotebook}
           />
         </Suspense>
       </main>

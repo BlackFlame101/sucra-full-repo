@@ -1,6 +1,6 @@
 "use client"
 
-import { ArrowRight, CheckCircle2, Eye, Lightbulb, Sparkles } from "lucide-react"
+import { ArrowRight, CheckCircle2, Eye, Lightbulb, Sparkles, Library, NotebookPen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { PublicCorrection, PublicSolution } from "@/lib/socra-ws"
 
@@ -9,12 +9,16 @@ export function ExerciseFeedbackCard({
   solution,
   onRevealSolution,
   onNextExercise,
+  onSaveToLibrary,
+  onSaveToNotebook,
   disabled = false,
 }: {
   correction: PublicCorrection
   solution: PublicSolution | null
   onRevealSolution: () => void
   onNextExercise: () => void
+  onSaveToLibrary: (correction: PublicCorrection, solution: PublicSolution) => void
+  onSaveToNotebook: (correction: PublicCorrection, solution: PublicSolution) => void
   disabled?: boolean
 }) {
   return (
@@ -81,6 +85,7 @@ export function ExerciseFeedbackCard({
             </div>
           )}
           <p className="text-xs text-muted-foreground">You have revealed the solution for this exercise.</p>
+          <div className="flex flex-wrap gap-2 border-t border-primary/10 pt-3"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary(correction, solution)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook(correction, solution)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>
         </div>
       ) : (
         <Button type="button" variant="outline" className="gap-2" onClick={onRevealSolution} disabled={disabled}>

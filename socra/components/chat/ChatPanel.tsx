@@ -43,6 +43,10 @@ interface ChatPanelProps {
   onRevealSolution: () => void
   explanation: PublicExplanation | null
   onDiscussExplanation: (question: string) => void
+  onSaveExplanationToLibrary: (explanation: PublicExplanation) => void
+  onSaveExplanationToNotebook: (explanation: PublicExplanation) => void
+  onSaveExerciseToLibrary: (correction: PublicCorrection, solution: PublicSolution) => void
+  onSaveExerciseToNotebook: (correction: PublicCorrection, solution: PublicSolution) => void
 }
 
 export function ChatPanel({
@@ -68,6 +72,10 @@ export function ChatPanel({
   onRevealSolution,
   explanation,
   onDiscussExplanation,
+  onSaveExplanationToLibrary,
+  onSaveExplanationToNotebook,
+  onSaveExerciseToLibrary,
+  onSaveExerciseToNotebook,
 }: ChatPanelProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const didInitialScrollRef = useRef(false)
@@ -182,8 +190,8 @@ export function ChatPanel({
               return (
                 <div className="flex flex-col gap-4">
                   {messageExercise && <ExerciseCard key={messageExercise.id} exercise={messageExercise} onNextExercise={onNextExercise} onSubmitAttempt={onSubmitAttempt} disabled={status !== "ready"} submissionLocked={solution?.exercise_id === messageExercise.id} />}
-                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} disabled={status !== "ready"} />}
-                  {messageExplanation && <ExplanationCard explanation={messageExplanation} onDiscuss={onDiscussExplanation} disabled={status !== "ready"} />}
+                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} onSaveToNotebook={onSaveExerciseToNotebook} disabled={status !== "ready"} />}
+                  {messageExplanation && <ExplanationCard explanation={messageExplanation} onDiscuss={onDiscussExplanation} onSaveToLibrary={onSaveExplanationToLibrary} onSaveToNotebook={onSaveExplanationToNotebook} disabled={status !== "ready"} />}
                 </div>
               )
             }}

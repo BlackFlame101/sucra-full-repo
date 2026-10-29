@@ -38,8 +38,8 @@ interface NavUser {
 
 const navLinks = [
   { label: "Active Courses", href: "/dashboard", disabled: false },
-  { label: "Library", href: "#", disabled: true },
-  { label: "Notebook", href: "#", disabled: true },
+  { label: "Library", href: "/dashboard/library", disabled: false },
+  { label: "Notebook", href: "/dashboard/notebook", disabled: false },
 ]
 
 function getInitials(name: string): string {
@@ -87,7 +87,7 @@ export function DashboardNavbar({ user }: { user: NavUser }) {
                   className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                     link.disabled
                       ? "text-muted-foreground/50 cursor-not-allowed"
-                      : pathname === link.href || pathname.startsWith(link.href + "/")
+                      : (link.href === "/dashboard" ? pathname === link.href : pathname === link.href || pathname.startsWith(link.href + "/"))
                         ? "bg-muted text-foreground"
                         : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                   }`}
@@ -119,7 +119,7 @@ export function DashboardNavbar({ user }: { user: NavUser }) {
               !link.disabled &&
               (link.href === "/dashboard"
                 ? pathname === "/dashboard"
-                : pathname.startsWith(link.href))
+                : pathname === link.href || pathname.startsWith(link.href + "/"))
 
             if (link.disabled) {
               return (

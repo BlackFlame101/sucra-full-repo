@@ -1,13 +1,15 @@
 "use client"
 
 import { useState } from "react"
-import { ArrowRight, BookOpen, Check, Copy, Lightbulb } from "lucide-react"
+import { ArrowRight, BookOpen, Check, Copy, Lightbulb, Library, NotebookPen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { PublicExplanation } from "@/lib/socra-ws"
 
-export function ExplanationCard({ explanation, onDiscuss, disabled = false }: {
+export function ExplanationCard({ explanation, onDiscuss, onSaveToLibrary, onSaveToNotebook, disabled = false }: {
   explanation: PublicExplanation
   onDiscuss: (question: string) => void
+  onSaveToLibrary: (explanation: PublicExplanation) => void
+  onSaveToNotebook: (explanation: PublicExplanation) => void
   disabled?: boolean
 }) {
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
@@ -55,6 +57,7 @@ export function ExplanationCard({ explanation, onDiscuss, disabled = false }: {
         <BookOpen className="h-5 w-5" />
         <h3 className="text-lg font-semibold text-foreground">Course explanation</h3>
       </div>
+      <div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary(explanation)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook(explanation)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>
       {explanation.definition ? <div className="space-y-2"><h4 className="text-sm font-semibold">Definition</h4><p className="text-sm leading-relaxed text-muted-foreground">{explanation.definition}</p></div> : null}
       {explanation.intuition ? <div className="space-y-2"><h4 className="text-sm font-semibold">Intuition</h4><p className="text-sm leading-relaxed text-muted-foreground">{explanation.intuition}</p></div> : null}
       {explanation.sections?.length ? <div className="space-y-4">{explanation.sections.map((section, index) => {
