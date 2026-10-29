@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server"
 import { createClient } from "@/lib/supabase/server"
 
-export async function proxyExamRequest(path: string, method: "GET" | "POST", body?: unknown) {
+export async function proxyExamRequest(
+  path: string,
+  method: "GET" | "POST",
+  body?: unknown,
+  timeoutMs?: number,
+) {
   const supabase = await createClient()
   const [{ data: { user } }, { data: { session } }] = await Promise.all([
     supabase.auth.getUser(),
@@ -22,6 +27,7 @@ export async function proxyExamRequest(path: string, method: "GET" | "POST", bod
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
         cache: "no-store",
       },
     )

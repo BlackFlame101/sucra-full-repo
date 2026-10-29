@@ -29,6 +29,8 @@ export async function GET(
   const examsResponse = await proxyExamRequest(
     `/exams/course/${encodeURIComponent(courseId)}/sessions`,
     "GET",
+    undefined,
+    4000,
   )
   const examPayload: unknown = examsResponse.ok ? await examsResponse.json() : []
   const exams = Array.isArray(examPayload) ? examPayload as Array<{
