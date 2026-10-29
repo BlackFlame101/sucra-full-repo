@@ -36,19 +36,25 @@ def parse_json_object(content: Any) -> dict[str, Any]:
     else:
         if text.lstrip().startswith("["):
             raise ValueError("Model response must contain an object, not an array")
-        start, end = text.find("{"), text.rfind("}")
-        if start >= 0 and end > start:
-            text = text[start : end + 1]
 
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as json_error:
-        # Some providers emit Python-style single-quoted dicts. Accept only
-        # literal syntax; never evaluate model output as executable code.
+    decoder = json.JSONDecoder()
+    starts = [index for index, char in enumerate(text) if char == "{"]
+    last_error: Exception | None = None
+    for start in starts:
+        candidate = text[start:].lstrip()
         try:
-            value = ast.literal_eval(text)
-        except (SyntaxError, ValueError):
-            raise json_error
-    if not isinstance(value, dict):
-        raise ValueError("Model response must contain a JSON object")
-    return value
+            value, _end = decoder.raw_decode(candidate)
+        except json.JSONDecodeError as json_error:
+            last_error = json_error
+            # Some providers emit Python-style single-quoted dicts. Accept only
+            # literal syntax; never evaluate model output as executable code.
+            try:
+                value = ast.literal_eval(candidate)
+            except (SyntaxError, ValueError):
+                continue
+        if isinstance(value, dict):
+            return value
+
+    if last_error:
+        raise last_error
+    raise ValueError("Model response must contain a JSON object")

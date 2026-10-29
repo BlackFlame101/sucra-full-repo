@@ -32,6 +32,13 @@ class StructuredOutputTests(unittest.TestCase):
     def test_accepts_literal_single_quoted_object_safely(self) -> None:
         self.assertEqual(parse_json_object("{'topic': 'Entropy'}"), {"topic": "Entropy"})
 
+    def test_recovers_first_object_when_provider_adds_trailing_json(self) -> None:
+        content = '{"definition": "A topic", "citations": [1]}\n{"extra": true}'
+        self.assertEqual(parse_json_object(content), {"definition": "A topic", "citations": [1]})
+
+    def test_recovers_object_after_unstructured_prefix(self) -> None:
+        self.assertEqual(parse_json_object('Result follows:\n{"topic": "Entropy"}'), {"topic": "Entropy"})
+
     def test_rejects_non_object_output(self) -> None:
         with self.assertRaises(ValueError):
             parse_json_object('[{"topic": "Entropy"}]')

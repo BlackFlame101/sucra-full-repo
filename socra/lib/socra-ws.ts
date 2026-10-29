@@ -40,7 +40,7 @@ export type LearningMode = "socratic" | "exercise" | "explain"
 export interface PublicExplanation {
   definition: string
   intuition: string
-  sections?: Array<{ heading: string; content: string }>
+  sections?: Array<{ heading: string; content: string; code?: string; code_language?: string; walkthrough?: Array<{ code: string; explanation: string }> }>
   course_example: string
   common_pitfalls: string[]
   citations: ExerciseCitation[]

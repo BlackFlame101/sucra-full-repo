@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agents.explicateur import _bind_sources
+from agents.explicateur import _bind_sources, _normalize_explanation_payload
 
 
 class ExplanationCitationTests(unittest.TestCase):
@@ -26,6 +26,34 @@ class ExplanationCitationTests(unittest.TestCase):
     def test_rejects_unmatched_source(self) -> None:
         with self.assertRaisesRegex(ValueError, "does not match"):
             _bind_sources({"citations": [{"source_index": 8}]}, self.chunks)
+
+    def test_normalizes_string_pitfalls_to_a_list(self) -> None:
+        payload = _normalize_explanation_payload({
+            "common_pitfalls": "Failing to launch the program.",
+            "sections": [{"heading": "Run", "content": "Run the program from its folder."}],
+            "citations": [1],
+        })
+        self.assertEqual(payload["common_pitfalls"], ["Failing to launch the program."])
+
+    def test_normalizes_string_section_and_citation_shapes(self) -> None:
+        payload = _normalize_explanation_payload({
+            "sections": ["A detailed section explaining the concept."],
+            "citations": "1",
+        })
+        self.assertEqual(payload["sections"][0]["heading"], "Section 1")
+        self.assertEqual(payload["citations"], ["1"])
+
+    def test_splits_inline_code_explanations_into_walkthrough_rows(self) -> None:
+        payload = _normalize_explanation_payload({
+            "sections": [{
+                "heading": "Line by line",
+                "content": "Intro\n- `import sys` : Imports arguments support [4].\n- `sc.stop()` : Stops Spark [4].",
+            }],
+        })
+        section = payload["sections"][0]
+        self.assertEqual(section["content"], "Intro")
+        self.assertEqual(len(section["walkthrough"]), 2)
+        self.assertEqual(section["walkthrough"][0]["code"], "import sys")
 
 
 if __name__ == "__main__":
