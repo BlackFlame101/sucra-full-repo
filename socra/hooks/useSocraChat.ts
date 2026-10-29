@@ -38,6 +38,7 @@ interface UseSocraChatOpts {
   /** Optional per-request LLM config from the Settings dialog. Google and xAI
    *  are forwarded to the backend; other providers are not yet supported there. */
   llmConfig?: { apiKey?: string; provider?: string; model?: string }
+  language: "fr" | "en"
   onDiagnostic?: (d: DiagnosticReport) => void
   onContext?: (e: EvaluationResult) => void
   onExercise?: (e: PublicExercise) => void
@@ -108,7 +109,7 @@ function attachAssistantMetadata(messages: UIMessage[], key: string, value: unkn
 }
 
 export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
-  const { sessionId, courseId, llmConfig, onDiagnostic, onContext, onExercise, onExplanation, onCorrection, onSolution, onError } = opts
+  const { sessionId, courseId, llmConfig, language, onDiagnostic, onContext, onExercise, onExplanation, onCorrection, onSolution, onError } = opts
 
   const [messages, setMessages] = useState<UIMessage[]>([])
   // Start in "ready" so the chat input is enabled right away — the WS only
@@ -296,6 +297,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
               courseId,
               sessionId,
               mode: pending.mode,
+              language,
               ...(accessToken ? { accessToken } : {}),
               ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
               ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
@@ -311,7 +313,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           onErrorRef.current?.(e)
         })
     },
-    [courseId, sessionId, ensureSocket]
+    [courseId, sessionId, language, ensureSocket]
   )
 
   const regenerate = useCallback(() => {
@@ -360,6 +362,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
             courseId,
             sessionId,
             mode: "exercise",
+            language,
             accessToken: data.session.access_token,
             ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
             ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
@@ -374,7 +377,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           onErrorRef.current?.(e)
         })
     },
-    [courseId, sessionId, ensureSocket]
+    [courseId, sessionId, language, ensureSocket]
   )
 
   const revealSolution = useCallback(

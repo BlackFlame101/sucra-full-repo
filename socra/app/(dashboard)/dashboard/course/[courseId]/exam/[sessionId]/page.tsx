@@ -92,6 +92,7 @@ export default function MixedExamPage() {
   const [initializing, setInitializing] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [language, setLanguage] = useState<"fr" | "en">("fr")
 
   const questions = exam?.questions ?? []
   const currentQuestion = questions[currentIndex]
@@ -115,6 +116,10 @@ export default function MixedExamPage() {
     setExam(null)
     setError("")
     const storedId = window.localStorage.getItem(examStorageKey)
+    fetch(`/api/sessions/${courseId}`).then((response) => response.ok ? response.json() : []).then((sessions) => {
+      const current = sessions.find((session: { id: string; language?: string }) => session.id === sessionId)
+      if (current?.language === "fr" || current?.language === "en") setLanguage(current.language)
+    }).catch(() => {})
     if (!storedId && !restoreSavedExam) {
       setInitializing(false)
       return () => { cancelled = true }
@@ -146,7 +151,7 @@ export default function MixedExamPage() {
       })
       .finally(() => { if (!cancelled) setInitializing(false) })
     return () => { cancelled = true }
-  }, [examStorageKey, restoreSavedExam, sessionId])
+  }, [examStorageKey, restoreSavedExam, sessionId, courseId])
 
   useEffect(() => {
     if (!currentQuestion || !exam) {
@@ -166,10 +171,20 @@ export default function MixedExamPage() {
     }
   }
 
+  const saveLanguage = async (nextLanguage: "fr" | "en") => {
+    const response = await fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language: nextLanguage }),
+    })
+    if (!response.ok) throw new Error("Could not save the response language.")
+  }
+
   const startExam = async () => {
     setBusy(true)
     setError("")
     try {
+      await saveLanguage(language)
       const response = await fetch("/api/exams/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -180,6 +195,7 @@ export default function MixedExamPage() {
           question_count: questionCount,
           exercise_types: selectedTypes,
           difficulty,
+          language,
           ...modelOptions(),
         }),
       })
@@ -216,6 +232,7 @@ export default function MixedExamPage() {
 
   const submitExam = async () => {
     if (!exam) return
+    await saveLanguage(language)
     const response = await fetch(`/api/exams/${encodeURIComponent(exam.id)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -317,6 +334,23 @@ export default function MixedExamPage() {
         <p className="mt-3 max-w-2xl leading-relaxed text-muted-foreground">
           {exam ? `${exam.questions.length} verified, course-grounded questions. Your answers are graded together when you finish.` : "Choose your question types and exam length. Socra balances selected types as evenly as possible and uses only formats the course material can support."}
         </p>
+      </div>
+
+      <div className="mb-6 max-w-xs space-y-2">
+        <label htmlFor="exam-language" className="text-sm font-medium">Response language</label>
+        <Select value={language} onValueChange={async (value) => {
+          const nextLanguage = value as "fr" | "en"
+          try {
+            await saveLanguage(nextLanguage)
+            setLanguage(nextLanguage)
+            setError("")
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : "Could not save the response language.")
+          }
+        }}>
+          <SelectTrigger id="exam-language" aria-label="Response language"><SelectValue /></SelectTrigger>
+          <SelectContent><SelectItem value="fr">Français</SelectItem><SelectItem value="en">English</SelectItem></SelectContent>
+        </Select>
       </div>
 
       {error && <div role="alert" className="mb-6 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}

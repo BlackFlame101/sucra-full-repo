@@ -187,6 +187,7 @@ async def run_evaluateur(state: SocraState) -> SocraState:
     history = state.get("messages") or []
     profile = state.get("profile") or {}
     tutor_signal = state.get("tutor_signal") or {}
+    response_language = "French" if (state.get("language") or "fr").lower().startswith("fr") else "English"
 
     # Reuse any chunks the Tuteur already pulled; otherwise retrieve fresh.
     chunks = state.get("retrieved_chunks") or []
@@ -213,7 +214,10 @@ async def run_evaluateur(state: SocraState) -> SocraState:
     used_fallback = False
     try:
         result = await llm.ainvoke(
-            [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_prompt)]
+            [SystemMessage(content=(
+                f"{SYSTEM_PROMPT}\n\nLANGUAGE REQUIREMENT: Write every natural-language value in the JSON "
+                f"in {response_language}. Preserve filenames, proper nouns, and quoted source text as given."
+            )), HumanMessage(content=user_prompt)]
         )
         data = parse_json_object(result.content)
         evaluation = _normalise_evaluation(data, chunks)

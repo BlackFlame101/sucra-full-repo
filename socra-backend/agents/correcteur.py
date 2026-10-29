@@ -279,6 +279,7 @@ def _bind_criterion_feedback(
 async def _grade_once(
     *, state: SocraState, exercise: dict[str, Any], answer: str, previous_issue: str
 ) -> CorrectionResult:
+    response_language = "French" if (state.get("language") or "fr").lower().startswith("fr") else "English"
     rubric = exercise.get("rubric") or []
     source_citations = exercise.get("citations") or []
     public_material = {
@@ -298,7 +299,11 @@ async def _grade_once(
         provider=state.get("provider"),
     )
     result = await llm.ainvoke([
-        SystemMessage(content=CORRECTEUR_PROMPT),
+        SystemMessage(content=(
+            f"{CORRECTEUR_PROMPT}\n\nLANGUAGE REQUIREMENT: Write overall_feedback, every feedback value, "
+            f"and next_step in {response_language}, regardless of the student's answer language. "
+            "Preserve each rubric criterion exactly as supplied."
+        )),
         HumanMessage(content=json.dumps(public_material, ensure_ascii=False)),
     ])
     data = parse_json_object(result.content)

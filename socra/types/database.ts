@@ -232,6 +232,7 @@ export type Database = {
           course_id: string
           created_at: string
           id: string
+          language: string
           title: string | null
           updated_at: string
         }
@@ -239,6 +240,7 @@ export type Database = {
           course_id: string
           created_at?: string
           id?: string
+          language?: string
           title?: string | null
           updated_at?: string
         }
@@ -246,6 +248,7 @@ export type Database = {
           course_id?: string
           created_at?: string
           id?: string
+          language?: string
           title?: string | null
           updated_at?: string
         }

@@ -34,6 +34,7 @@ import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 
 import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -88,6 +89,7 @@ export default function DiagnosticPage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [topic, setTopic] = useState("")
   const [learningMode, setLearningMode] = useState<LearningMode>("socratic")
+  const [language, setLanguage] = useState<"fr" | "en">("fr")
   const [phase, setPhase] = useState<Phase>("picking")
   const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null)
   const [tutorOpening, setTutorOpening] = useState("")
@@ -105,10 +107,11 @@ export default function DiagnosticPage() {
 
     async function bootstrap() {
       try {
-        const [coursesRes, docsRes, msgsRes] = await Promise.all([
+        const [coursesRes, docsRes, msgsRes, sessionsRes] = await Promise.all([
           fetch("/api/courses"),
           fetch(`/api/documents/${courseId}`),
           fetch(`/api/sessions/${sessionId}/messages`),
+          fetch(`/api/sessions/${courseId}`),
         ])
 
         if (cancelled) return
@@ -119,6 +122,11 @@ export default function DiagnosticPage() {
           if (found) setCourse(found)
         }
         if (docsRes.ok) setDocuments(await docsRes.json())
+        if (sessionsRes.ok) {
+          const sessions = await sessionsRes.json()
+          const current = sessions.find((session: { id: string; language?: string }) => session.id === sessionId)
+          if (current?.language === "en" || current?.language === "fr") setLanguage(current.language)
+        }
 
         if (msgsRes.ok) {
           const msgs = await msgsRes.json()
@@ -170,13 +178,24 @@ export default function DiagnosticPage() {
   // ----------------------------------------------------------------
   // Begin diagnostic — open WS, send the topic, capture diagnostic + opening.
   // ----------------------------------------------------------------
-  const beginDiagnostic = (text: string) => {
+  const beginDiagnostic = async (text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     setErrorMessage(null)
     setDiagnostic(null)
     setTutorOpening("")
     setPhase("thinking")
+
+    const languageResponse = await fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language }),
+    }).catch(() => null)
+    if (!languageResponse?.ok) {
+      setErrorMessage("Could not save your language preference. Please try again.")
+      setPhase("error")
+      return
+    }
 
     let ws: WebSocket
     try {
@@ -208,6 +227,7 @@ export default function DiagnosticPage() {
             courseId,
             sessionId,
             mode: learningMode,
+            language,
             ...(accessToken ? { accessToken } : {}),
             ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
             ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
@@ -321,6 +341,13 @@ export default function DiagnosticPage() {
       {/* Picking phase */}
       {phase === "picking" && (
         <div className="space-y-5">
+          <div className="max-w-xs space-y-2">
+            <label className="text-sm font-medium" htmlFor="inquiry-language">Response language</label>
+            <Select value={language} onValueChange={(value) => setLanguage(value as "fr" | "en")}>
+              <SelectTrigger id="inquiry-language" aria-label="Response language"><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="fr">Français</SelectItem><SelectItem value="en">English</SelectItem></SelectContent>
+            </Select>
+          </div>
           <div>
             <p className="mb-3 text-sm font-medium">Choose how you want to study</p>
             <div role="group" aria-label="Learning mode" className="grid gap-3 md:grid-cols-3">

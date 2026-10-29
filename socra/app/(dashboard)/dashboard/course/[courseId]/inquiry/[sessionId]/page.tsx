@@ -10,6 +10,7 @@ import { SettingsDialog } from "@/components/settings/SettingsDialog"
 import { UploadModal } from "@/components/documents/UploadModal"
 import { useSocraChat } from "@/hooks/useSocraChat"
 import { useUserSettings } from "@/hooks/useUserSettings"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   adaptSuggestedReadings,
   type ContextPanelReading,
@@ -83,6 +84,7 @@ export default function InquiryPage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionTitle, setSessionTitle] = useState("New Inquiry")
+  const [language, setLanguage] = useState<"fr" | "en">("fr")
   const [messagesLoading, setMessagesLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
@@ -179,6 +181,7 @@ export default function InquiryPage() {
   const { messages, status, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate } = useSocraChat({
     sessionId,
     courseId,
+    language,
     llmConfig,
     onContext: handleContext,
     onExercise: handleExercise,
@@ -310,6 +313,7 @@ export default function InquiryPage() {
           const allSessions = await sessionsRes.json()
           const current = allSessions.find((s: Session) => s.id === sessionId)
           if (current?.title) setSessionTitle(current.title)
+          if (current?.language === "fr" || current?.language === "en") setLanguage(current.language)
           setSessions(allSessions)
         }
       } catch {
@@ -335,6 +339,20 @@ export default function InquiryPage() {
       setSolution(null)
     }
     sendMessage({ text, mode: learningMode })
+  }
+
+  const handleLanguageChange = async (nextLanguage: "fr" | "en") => {
+    const response = await fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ language: nextLanguage }),
+    })
+    if (!response.ok) {
+      toast.error("Could not save the response language")
+      return
+    }
+    setLanguage(nextLanguage)
+    setSessions((previous) => previous.map((session) => session.id === sessionId ? { ...session, language: nextLanguage } : session))
   }
 
   const handleNextExercise = () => {
@@ -468,6 +486,8 @@ export default function InquiryPage() {
         <Suspense fallback={<ChatPanelFallback />}>
           <ChatPanel
             sessionTitle={sessionTitle}
+            language={language}
+            onLanguageChange={(value) => void handleLanguageChange(value)}
             messages={messages}
             input={input}
             status={status}

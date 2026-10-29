@@ -15,7 +15,27 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { title } = await request.json()
+  const body = await request.json()
+  if (body?.language !== undefined) {
+    if (body.language !== "fr" && body.language !== "en") {
+      return NextResponse.json({ error: "Language must be fr or en" }, { status: 400 })
+    }
+    const { data: sessionRecord } = await supabase
+      .from("sessions")
+      .select("id, course_id")
+      .eq("id", sessionId)
+      .single()
+    if (!sessionRecord) return NextResponse.json({ error: "Inquiry not found" }, { status: 404 })
+    const { data: course } = await supabase.from("courses").select("id")
+      .eq("id", sessionRecord.course_id).eq("user_id", user.id).single()
+    if (!course) return NextResponse.json({ error: "Inquiry not found" }, { status: 404 })
+    const { data: session, error } = await supabase.from("sessions")
+      .update({ language: body.language, updated_at: new Date().toISOString() })
+      .eq("id", sessionId).select().single()
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json(session)
+  }
+  const { title } = body
   const normalizedTitle = typeof title === "string" ? title.trim() : ""
 
   if (!normalizedTitle) {

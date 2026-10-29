@@ -21,6 +21,7 @@ from db.exams import (
     save_exam_answer,
     save_exam_results,
 )
+from db.diagnostics import get_language_for_session
 from db.supabase_client import get_supabase
 from graph.orchestrator import get_compiled_graph
 from rag.retriever import get_current_course_sections
@@ -152,6 +153,7 @@ class ExamStartRequest(BaseModel):
     api_key: str = Field(default="", max_length=2000)
     provider: Literal["google", "xai"] = "google"
     model: str = Field(default="", max_length=120)
+    language: Literal["fr", "en"] = "fr"
 
     @model_validator(mode="after")
     def validate_selected_types(self) -> "ExamStartRequest":
@@ -322,7 +324,7 @@ async def start_exam(
                         "course_id": course_id,
                         "session_id": session_id,
                         "user_id": user_id,
-                        "language": "en",
+                        "language": request.language,
                         "requested_difficulty": request.difficulty,
                         "provider": request.provider,
                         "messages": [],
@@ -453,7 +455,7 @@ async def submit_exam(
                 "exercise_record": exercise,
                 "student_answer": str(answers[exercise_id]),
                 "hints_used": 0,
-                "language": "en",
+                "language": get_language_for_session(str(exam["session_id"])),
                 "provider": request.provider,
                 "messages": [],
             }

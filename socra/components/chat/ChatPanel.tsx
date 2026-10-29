@@ -22,6 +22,8 @@ import type { UIMessage } from "ai"
 
 interface ChatPanelProps {
   sessionTitle: string
+  language: "fr" | "en"
+  onLanguageChange: (language: "fr" | "en") => void
   messages: UIMessage[]
   input: string
   status: string
@@ -45,6 +47,8 @@ interface ChatPanelProps {
 
 export function ChatPanel({
   sessionTitle,
+  language,
+  onLanguageChange,
   messages,
   input,
   status,
@@ -139,6 +143,10 @@ export function ChatPanel({
           </Badge>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          <Select value={language} onValueChange={(value) => onLanguageChange(value as "fr" | "en")}>
+            <SelectTrigger className="w-28" aria-label="Response language"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="fr">Français</SelectItem><SelectItem value="en">English</SelectItem></SelectContent>
+          </Select>
           <Select value={learningMode} onValueChange={(value) => onLearningModeChange(value as LearningMode)}>
             <SelectTrigger className="w-44" aria-label="Learning mode">
               <SelectValue />

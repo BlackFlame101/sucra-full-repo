@@ -11,7 +11,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { courseId, title } = await request.json()
+  const { courseId, title, language } = await request.json()
 
   if (!courseId) {
     return NextResponse.json({ error: "Missing courseId" }, { status: 400 })
@@ -33,6 +33,7 @@ export async function POST(request: Request) {
     .insert({
       course_id: courseId,
       title: title || "New Inquiry",
+      language: language === "en" ? "en" : "fr",
     })
     .select()
     .single()

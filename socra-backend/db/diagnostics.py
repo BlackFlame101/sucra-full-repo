@@ -51,3 +51,11 @@ def get_course_id_for_session(session_id: str) -> str | None:
     if not res.data:
         return None
     return res.data.get("course_id")
+
+
+def get_language_for_session(session_id: str) -> str:
+    res = (
+        get_supabase().table("sessions").select("language")
+        .eq("id", session_id).single().execute()
+    )
+    return "en" if (res.data or {}).get("language") == "en" else "fr"

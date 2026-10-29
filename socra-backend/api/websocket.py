@@ -44,7 +44,7 @@ from db.attempts import (
     has_revealed_solution,
     reveal_solution_for_owner,
 )
-from db.diagnostics import get_course_id_for_session
+from db.diagnostics import get_course_id_for_session, get_language_for_session
 from db.supabase_client import get_supabase
 from graph.orchestrator import get_compiled_graph
 from graph.state import ChatTurn, SocraState
@@ -68,6 +68,7 @@ def _build_initial_state(
     model: str = "",
     provider: str = "google",
     mode: str = "socratic",
+    language: str = "fr",
 ) -> SocraState:
     state: SocraState = {
         "session_id": session_id,
@@ -76,9 +77,7 @@ def _build_initial_state(
         "messages": history,
         "student_message": student_message,
         "mode": mode,
-        "language": "fr" if any(ch in student_message.lower() for ch in "éèêàçùôîû") or any(
-            token in f" {student_message.lower()} " for token in (" je ", " est ", " les ", " des ", " pourquoi ", " comment ", "dans ")
-        ) else "en",
+        "language": "en" if language == "en" else "fr",
         "is_first_message": is_first_message,
         "profile": {
             "session_id": session_id,
@@ -150,6 +149,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         ]
 
         course_id_resolved = get_course_id_for_session(session_id)
+        session_language = get_language_for_session(session_id)
         user_id_resolved = profiles_db.get_user_id_for_session(session_id)
 
         loaded_profile = profiles_db.get_profile(session_id) or {}
@@ -382,6 +382,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 model=client_model,
                 provider=client_provider or "google",
                 mode="correct" if action == "submit_attempt" else requested_mode,
+                language=(str(payload.get("language")) if payload.get("language") in ("fr", "en") else session_language),
             )
             if action == "submit_attempt":
                 initial_state["exercise_record"] = exercise_record or {}
