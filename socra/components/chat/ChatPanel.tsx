@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { Share2, MoreVertical, RotateCcw, ArrowDown } from "lucide-react"
+import { Bookmark, MoreVertical, RotateCcw, ArrowDown } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -47,6 +47,9 @@ interface ChatPanelProps {
   onSaveExplanationToNotebook: (explanation: PublicExplanation) => void
   onSaveExerciseToLibrary: (correction: PublicCorrection, solution: PublicSolution) => void
   onSaveExerciseToNotebook: (correction: PublicCorrection, solution: PublicSolution) => void
+  onSaveSessionToLibrary: () => void
+  sessionSavedToLibrary: boolean
+  savingSessionToLibrary: boolean
 }
 
 export function ChatPanel({
@@ -76,6 +79,9 @@ export function ChatPanel({
   onSaveExplanationToNotebook,
   onSaveExerciseToLibrary,
   onSaveExerciseToNotebook,
+  onSaveSessionToLibrary,
+  sessionSavedToLibrary,
+  savingSessionToLibrary,
 }: ChatPanelProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const didInitialScrollRef = useRef(false)
@@ -165,8 +171,18 @@ export function ChatPanel({
               <SelectItem value="explain">Explain a topic</SelectItem>
             </SelectContent>
           </Select>
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
-            <Share2 className="h-4 w-4" />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 px-2 text-muted-foreground hover:text-secondary"
+            aria-label={sessionSavedToLibrary ? "Saved to Library" : "Save inquiry to Library"}
+            title={sessionSavedToLibrary ? "Saved to Library" : "Save inquiry to Library"}
+            disabled={sessionSavedToLibrary || savingSessionToLibrary || messagesLoading || messages.length === 0}
+            onClick={onSaveSessionToLibrary}
+          >
+            <Bookmark className={`h-4 w-4 ${sessionSavedToLibrary ? "fill-current text-secondary" : ""}`} />
+            <span>{savingSessionToLibrary ? "Saving…" : sessionSavedToLibrary ? "Saved" : "Save"}</span>
           </Button>
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
             <MoreVertical className="h-4 w-4" />

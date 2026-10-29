@@ -43,7 +43,7 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   const body = await request.json().catch(() => null)
-  if (!body || !["explanation", "exercise"].includes(body.item_type) ||
+  if (!body || !["explanation", "exercise", "inquiry", "exam"].includes(body.item_type) ||
       typeof body.course_id !== "string" || typeof body.title !== "string" ||
       !body.title.trim() || !body.content || typeof body.content !== "object") {
     return NextResponse.json({ error: "A course, title, item type, and saved content are required." }, { status: 400 })

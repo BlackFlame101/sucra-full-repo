@@ -3,13 +3,14 @@
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { ArrowLeft, ArrowRight, BookOpen, CheckCircle2, ClipboardCheck, LoaderCircle, SkipForward } from "lucide-react"
+import { ArrowLeft, ArrowRight, BookOpen, Bookmark, CheckCircle2, ClipboardCheck, LoaderCircle, SkipForward } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useUserSettings } from "@/hooks/useUserSettings"
 import type { CourseExam, ExamQuestion } from "@/lib/exams"
+import { toast } from "sonner"
 
 const EXAM_QUESTION_TYPES = [
   { id: "short_answer", label: "Short answer", help: "Explain or recall concepts" },
@@ -92,6 +93,8 @@ export default function MixedExamPage() {
   const [initializing, setInitializing] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [sessionSavedToLibrary, setSessionSavedToLibrary] = useState(false)
+  const [savingSessionToLibrary, setSavingSessionToLibrary] = useState(false)
   const [language, setLanguage] = useState<"fr" | "en">("fr")
 
   const questions = exam?.questions ?? []
@@ -109,6 +112,16 @@ export default function MixedExamPage() {
       ["sql", "SQL query"],
     ] as const).filter(([type]) => exam.requested_types.includes(type) && !available.has(type)).map(([, label]) => label)
   }, [exam])
+
+  useEffect(() => {
+    let cancelled = false
+    setSessionSavedToLibrary(false)
+    fetch(`/api/library/sessions/${encodeURIComponent(sessionId)}`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (!cancelled) setSessionSavedToLibrary(payload?.saved === true && payload?.item_type === "exam") })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [sessionId])
 
   useEffect(() => {
     let cancelled = false
@@ -230,6 +243,27 @@ export default function MixedExamPage() {
     } : previous)
   }
 
+  const saveExamToLibrary = async () => {
+    if (!exam) return
+    setSavingSessionToLibrary(true)
+    try {
+      if (exam.status === "in_progress" && answer.trim()) await saveAnswer()
+      const response = await fetch(`/api/library/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_type: "exam" }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || "Could not save this exam to your Library.")
+      setSessionSavedToLibrary(true)
+      toast.success("Saved to Library", { description: "This exam snapshot is ready to revisit." })
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not save this exam to your Library.")
+    } finally {
+      setSavingSessionToLibrary(false)
+    }
+  }
+
   const submitExam = async () => {
     if (!exam) return
     await saveLanguage(language)
@@ -325,9 +359,15 @@ export default function MixedExamPage() {
       </Link>
 
       <div className="mb-8">
-        <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-secondary/30 bg-secondary/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-secondary">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex items-center gap-2 rounded-full border border-secondary/30 bg-secondary/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-secondary">
           <ClipboardCheck className="h-3.5 w-3.5" /> Mixed course exam
         </div>
+        <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={!exam || busy || savingSessionToLibrary || sessionSavedToLibrary} onClick={() => void saveExamToLibrary()}>
+          <Bookmark className={`h-4 w-4 ${sessionSavedToLibrary ? "fill-current text-secondary" : ""}`} />
+          {savingSessionToLibrary ? "Saving…" : sessionSavedToLibrary ? "Saved to Library" : "Save to Library"}
+        </Button>
+      </div>
         <h1 className="font-serif text-3xl font-medium tracking-tight sm:text-4xl">
           {exam?.status === "completed" ? "Exam results" : "Test your course knowledge"}
         </h1>

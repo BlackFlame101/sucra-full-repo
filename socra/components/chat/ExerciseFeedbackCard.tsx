@@ -12,14 +12,16 @@ export function ExerciseFeedbackCard({
   onSaveToLibrary,
   onSaveToNotebook,
   disabled = false,
+  readOnly = false,
 }: {
   correction: PublicCorrection
   solution: PublicSolution | null
-  onRevealSolution: () => void
-  onNextExercise: () => void
-  onSaveToLibrary: (correction: PublicCorrection, solution: PublicSolution) => void
-  onSaveToNotebook: (correction: PublicCorrection, solution: PublicSolution) => void
+  onRevealSolution?: () => void
+  onNextExercise?: () => void
+  onSaveToLibrary?: (correction: PublicCorrection, solution: PublicSolution) => void
+  onSaveToNotebook?: (correction: PublicCorrection, solution: PublicSolution) => void
   disabled?: boolean
+  readOnly?: boolean
 }) {
   return (
     <section className="mx-4 mb-4 space-y-4 rounded-2xl border border-secondary/25 bg-card p-5 shadow-sm sm:mx-6 sm:p-6" aria-live="polite">
@@ -84,20 +86,20 @@ export function ExerciseFeedbackCard({
               </ul>
             </div>
           )}
-          <p className="text-xs text-muted-foreground">You have revealed the solution for this exercise.</p>
-          <div className="flex flex-wrap gap-2 border-t border-primary/10 pt-3"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary(correction, solution)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook(correction, solution)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>
+          {!readOnly && <p className="text-xs text-muted-foreground">You have revealed the solution for this exercise.</p>}
+          {!readOnly && <div className="flex flex-wrap gap-2 border-t border-primary/10 pt-3"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary?.(correction, solution)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook?.(correction, solution)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>}
         </div>
-      ) : (
+      ) : !readOnly ? (
         <Button type="button" variant="outline" className="gap-2" onClick={onRevealSolution} disabled={disabled}>
           <Eye className="h-4 w-4" /> Reveal suggested answer
         </Button>
-      )}
+      ) : null}
 
-      <div className="flex justify-end border-t border-border/70 pt-4">
+      {!readOnly && <div className="flex justify-end border-t border-border/70 pt-4">
         <Button type="button" className="gap-2" onClick={onNextExercise} disabled={disabled}>
           <Sparkles className="h-4 w-4" /> Generate another question <ArrowRight className="h-4 w-4" />
         </Button>
-      </div>
+      </div>}
     </section>
   )
 }

@@ -11,12 +11,14 @@ export function ExerciseCard({
   onSubmitAttempt,
   disabled = false,
   submissionLocked = false,
+  readOnly = false,
 }: {
   exercise: PublicExercise
   onNextExercise: () => void
   onSubmitAttempt: (answer: string, hintsUsed: number) => void
   disabled?: boolean
   submissionLocked?: boolean
+  readOnly?: boolean
 }) {
   const [revealedHints, setRevealedHints] = useState(0)
   const [answer, setAnswer] = useState("")
@@ -49,6 +51,29 @@ export function ExerciseCard({
       ? `${trimmedAnswer} ${exercise.numeric_unit}`
       : trimmedAnswer
     onSubmitAttempt(submittedAnswer, revealedHints)
+  }
+
+  if (readOnly) {
+    return (
+      <section className="mx-4 mb-4 rounded-2xl border border-primary/20 bg-card shadow-sm sm:mx-6">
+        <div className="space-y-5 p-5 sm:p-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-primary/10 px-3 py-1 text-xs font-medium text-primary">{exercise.exercise_type.replaceAll("_", " ")}</span>
+            <span className="rounded-full bg-muted px-3 py-1 text-xs capitalize text-muted-foreground">{exercise.difficulty}</span>
+            <span className="rounded-full bg-muted px-3 py-1 text-xs capitalize text-muted-foreground">{exercise.bloom_level}</span>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Exercise</p>
+            <h3 className="text-lg font-medium leading-relaxed text-foreground sm:text-xl">{exercise.prompt}</h3>
+            <p className="text-sm text-muted-foreground">Topic: {exercise.concept}</p>
+          </div>
+          {exercise.choices.length > 0 && <ol className="list-inside list-[upper-alpha] space-y-2 rounded-xl border border-border/70 p-4 text-sm">{exercise.choices.map((choice) => <li key={choice.id}><span className="font-medium">{choice.id}.</span> {choice.text}</li>)}</ol>}
+          {exercise.starter_code && <div className="overflow-hidden rounded-lg border border-border/70 bg-muted/50"><div className="border-b border-border/70 px-3 py-2 text-xs text-muted-foreground">{exercise.code_language || "Code"}</div><pre className="overflow-x-auto p-4 text-xs leading-relaxed"><code>{exercise.starter_code}</code></pre></div>}
+          {exercise.sql_setup.length > 0 && <div className="space-y-2"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">SQL setup</p>{exercise.sql_setup.map((statement, index) => <pre key={index} className="overflow-x-auto rounded-lg bg-muted/60 p-4 text-xs"><code>{statement}</code></pre>)}</div>}
+          {exercise.numeric_unit && <p className="text-sm text-muted-foreground">Expected unit: {exercise.numeric_unit}</p>}
+        </div>
+      </section>
+    )
   }
 
   return (

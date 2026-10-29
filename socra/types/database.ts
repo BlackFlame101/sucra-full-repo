@@ -14,7 +14,7 @@ export type Database = {
           id: string
           user_id: string
           course_id: string
-          item_type: "explanation" | "exercise"
+          item_type: "explanation" | "exercise" | "inquiry" | "exam"
           title: string
           content: Json
           source_document_id: string | null
@@ -25,7 +25,7 @@ export type Database = {
           id?: string
           user_id: string
           course_id: string
-          item_type: "explanation" | "exercise"
+          item_type: "explanation" | "exercise" | "inquiry" | "exam"
           title: string
           content?: Json
           source_document_id?: string | null
@@ -36,7 +36,7 @@ export type Database = {
           id?: string
           user_id?: string
           course_id?: string
-          item_type?: "explanation" | "exercise"
+          item_type?: "explanation" | "exercise" | "inquiry" | "exam"
           title?: string
           content?: Json
           source_document_id?: string | null

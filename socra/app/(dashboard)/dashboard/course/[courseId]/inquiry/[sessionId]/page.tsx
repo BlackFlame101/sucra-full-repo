@@ -103,6 +103,8 @@ export default function InquiryPage() {
   const [documents, setDocuments] = useState<Document[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionTitle, setSessionTitle] = useState("New Inquiry")
+  const [sessionSavedToLibrary, setSessionSavedToLibrary] = useState(false)
+  const [savingSessionToLibrary, setSavingSessionToLibrary] = useState(false)
   const [language, setLanguage] = useState<"fr" | "en">("fr")
   const [messagesLoading, setMessagesLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -114,6 +116,16 @@ export default function InquiryPage() {
   const [correction, setCorrection] = useState<PublicCorrection | null>(null)
   const [solution, setSolution] = useState<PublicSolution | null>(null)
   const [explanation, setExplanation] = useState<PublicExplanation | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setSessionSavedToLibrary(false)
+    fetch(`/api/library/sessions/${encodeURIComponent(sessionId)}`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => { if (!cancelled) setSessionSavedToLibrary(payload?.saved === true) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [sessionId])
 
   useEffect(() => {
     const lg = window.matchMedia("(min-width: 1024px)")
@@ -425,6 +437,25 @@ export default function InquiryPage() {
     toast.success("Saved to Library")
   }
 
+  const saveInquiryToLibrary = async () => {
+    setSavingSessionToLibrary(true)
+    try {
+      const response = await fetch(`/api/library/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ item_type: "inquiry" }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(payload?.error || "Could not save this inquiry to your Library.")
+      setSessionSavedToLibrary(true)
+      toast.success("Saved to Library", { description: "This inquiry transcript is ready to revisit." })
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Could not save this inquiry to your Library.")
+    } finally {
+      setSavingSessionToLibrary(false)
+    }
+  }
+
   const saveNotebookNote = async (title: string, content: string, sourceType: "explanation" | "exercise", sourceData: Record<string, unknown>, sourceDocumentId?: string, sourcePage?: number) => {
     const response = await fetch("/api/notebook", {
       method: "POST",
@@ -572,6 +603,9 @@ export default function InquiryPage() {
             onSaveExplanationToNotebook={handleSaveExplanationToNotebook}
             onSaveExerciseToLibrary={handleSaveExerciseToLibrary}
             onSaveExerciseToNotebook={handleSaveExerciseToNotebook}
+            onSaveSessionToLibrary={() => void saveInquiryToLibrary()}
+            sessionSavedToLibrary={sessionSavedToLibrary}
+            savingSessionToLibrary={savingSessionToLibrary}
           />
         </Suspense>
       </main>
