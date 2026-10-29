@@ -16,6 +16,52 @@ from rag.retriever import retrieve_chunks, retrieve_summary_guided_chunks
 
 logger = logging.getLogger(__name__)
 
+_EXPLANATION_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "definition": {"type": "string"},
+        "intuition": {"type": "string"},
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "heading": {"type": "string"},
+                    "content": {"type": "string"},
+                    "code": {"type": "string"},
+                    "code_language": {"type": "string"},
+                    "walkthrough": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "code": {"type": "string"},
+                                "explanation": {"type": "string"},
+                            },
+                            "required": ["code", "explanation"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["heading", "content", "code", "code_language", "walkthrough"],
+                "additionalProperties": False,
+            },
+        },
+        "course_example": {"type": "string"},
+        "common_pitfalls": {"type": "array", "items": {"type": "string"}},
+        "citations": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+        "check_question": {"type": "string"},
+    },
+    "required": [
+        "definition", "intuition", "sections", "course_example", "common_pitfalls",
+        "citations", "check_question",
+    ],
+    "additionalProperties": False,
+}
+
 EXPLAINER_PROMPT = """You are Socra's course-grounded explainer. Answer the student's exact
 request. The requested style is {style}; assignment-solving request: {assignment_mode}.
 For a short summary be concise (1-3 brief sections) and cover only essential ideas.
@@ -23,13 +69,16 @@ Otherwise teach the topic in depth by default: cover every major point in the co
 excerpts relevant to the request. Explain what each means, how it works, why it matters,
 how it connects to other points, and grounded examples and misconceptions where useful.
 For a broad request give as many substantive sections as complete coverage requires.
-When explaining code line by line, use each section's walkthrough field as an array of
-objects with code (the exact line or a short related group) and explanation (what it
-does and why). Leave it empty for sections that are not code walkthroughs. Do not write
-a long list of inline-code bullets in prose. Keep each item focused and spaced.
+When explaining code, put the complete runnable solution in the section's code field.
+Use the walkthrough field for a concise explanation of the most important code blocks:
+group roughly 4-8 related lines per item, use at most 8 items per exercise, and do not
+duplicate every line of the complete code. Explain what each block does and why. Leave
+walkthrough empty for sections that are not code walkthroughs. Keep items focused.
 
-For an assignment, first inventory every exercise and subquestion visible in the
-provided material using original numbering, then address them in order. For each state
+For an assignment, follow the requested scope exactly. If the student names one exercise,
+solve only that exercise and its subquestions. If the student asks for all exercises,
+first inventory every exercise and subquestion visible in the provided material using
+original numbering, then address all of them in order. For each state
 what it asks, relevant method/concepts, step-by-step reasoning, complete answer (include
 full code and run details only when specified/supported), explain key solution parts,
 and quickly check it against the task. Do not skip parts. Mark missing pages/data and
@@ -71,6 +120,10 @@ def _request_style(message: str) -> tuple[str, bool]:
         "answer every question", "all exercises", "حل التمارين", "حل الواجب",
         "expliquer et résoudre", "résous les exercices", "travaux pratiques",
         "corrigé complet",
+    )) or bool(re.search(
+        r"\b(?:solve|résous|resous|résoudre)\s+(?:(?:the|l['’]|le|la|un|une)\s*)?"
+        r"(?:exercise|exercice)\s*#?\s*\d+",
+        text,
     ))
     return ("short summary" if short else "detailed teaching explanation"), assignment
 
@@ -194,6 +247,67 @@ def _bind_sources(payload: dict[str, Any], chunks: list[dict[str, Any]]) -> dict
     return {**payload, "citations": bound}
 
 
+def _requested_exercise_numbers(message: str) -> list[str]:
+    return list(dict.fromkeys(re.findall(
+        r"\b(?:exercise|exercice)\s*#?\s*(\d+(?:\.\d+)*)",
+        message,
+        re.IGNORECASE,
+    )))
+
+
+async def _generate_valid_explanation(model: Any, prompt: list[Any], chunks: list[dict[str, Any]]) -> GeneratedExplanation:
+    last_error: ValueError | None = None
+    for attempt in range(2):
+        response = await model.ainvoke(prompt)
+        try:
+            if response.response_metadata.get("finish_reason") in ("length", "max_tokens"):
+                raise ValueError("The model reached its output token limit before completing the response")
+            raw = _normalize_explanation_payload(parse_json_object(response.content))
+            return GeneratedExplanation.model_validate(_bind_sources(raw, chunks))
+        except (ValueError, TypeError) as exc:
+            last_error = exc if isinstance(exc, ValueError) else ValueError(str(exc))
+            if attempt == 0:
+                prompt.append(HumanMessage(content=(
+                    "Your previous response could not be parsed or did not match the required schema. "
+                    f"Validation detail: {str(last_error)[:800]}. Return exactly one valid JSON object, "
+                    "with common_pitfalls as an array of strings, sections as objects with heading and "
+                    "content, and citations as an array containing only source_index integers from 1 to "
+                    f"{len(chunks)}. Choose at least one valid index. Keep only the exercise explicitly "
+                    "requested, group related code lines into a few walkthrough blocks, and shorten any "
+                    "repeated explanation while preserving the complete solution."
+                )))
+    if last_error and "output token limit" in str(last_error).lower():
+        raise ValueError(
+            "The explanation reached the output limit before it was complete. Try asking for one "
+            "exercise or topic section at a time."
+        ) from last_error
+    raise ValueError(
+        "Could not prepare a valid course-grounded explanation after retrying the response format."
+    ) from last_error
+
+
+def _merge_exercise_explanations(parts: list[GeneratedExplanation]) -> GeneratedExplanation:
+    first = parts[0].model_dump(mode="python")
+    first["sections"] = [section.model_dump(mode="python") for part in parts for section in part.sections]
+    pitfalls: list[str] = []
+    citations: list[dict[str, Any]] = []
+    seen_citations: set[tuple[str, int]] = set()
+    for part in parts:
+        for pitfall in part.common_pitfalls:
+            if pitfall not in pitfalls and len(pitfalls) < 8:
+                pitfalls.append(pitfall)
+        for citation in part.citations:
+            marker = (str(citation.document_id), citation.page_number)
+            if marker not in seen_citations and len(citations) < 8:
+                seen_citations.add(marker)
+                citations.append(citation.model_dump(mode="python"))
+    first["common_pitfalls"] = pitfalls
+    first["citations"] = citations
+    first["course_example"] = next((part.course_example for part in parts if part.course_example), "")
+    first["check_question"] = next((part.check_question for part in reversed(parts) if part.check_question), "")
+    return GeneratedExplanation.model_validate(first)
+
+
 async def run_explicateur(state: SocraState) -> SocraState:
     topic = (state.get("student_message") or "").strip()
     course_id = state.get("course_id", "")
@@ -237,24 +351,48 @@ async def run_explicateur(state: SocraState) -> SocraState:
                              f"{json.dumps(student_context, ensure_ascii=False)}\nCourse excerpts: "
                              f"{json.dumps(source_context, ensure_ascii=False)}")),
     ]
-    model = _model_for(state, temperature=0.3)
-    last_error: ValueError | None = None
-    for attempt in range(2):
-        response = await model.ainvoke(prompt)
-        try:
-            raw = _normalize_explanation_payload(parse_json_object(response.content))
-            explanation = GeneratedExplanation.model_validate(_bind_sources(raw, chunks))
-            break
-        except (ValueError, TypeError) as exc:
-            last_error = exc if isinstance(exc, ValueError) else ValueError(str(exc))
-            if attempt == 0:
-                prompt.append(HumanMessage(content=(
-                    "Your previous response could not be parsed or did not match the required schema. "
-                    f"Validation detail: {str(last_error)[:800]}. Return exactly one valid JSON object, "
-                    "with common_pitfalls as an array of strings, sections as objects with heading and "
-                    "content, and citations as an array containing only source_index integers from 1 to "
-                    f"{len(chunks)}. Choose at least one valid index and preserve the complete answer."
-                )))
+    model = _model_for(
+        state,
+        temperature=0.3,
+        response_schema=_EXPLANATION_RESPONSE_SCHEMA,
+        max_completion_tokens=16_000,
+    )
+    # Groq structured output mode and model fallback are applied centrally.
+    requested_numbers = _requested_exercise_numbers(topic)
+    labelled_exercises = [
+        item for item in inventory
+        if re.search(r"\b(?:exercise|exercice)\b", item["number"], re.IGNORECASE)
+    ]
+    if assignment_mode and requested_numbers:
+        candidates = labelled_exercises or inventory
+        targets = [
+            item for item in candidates
+            if (match := re.search(r"\d+(?:\.\d+)*", item["number"]))
+            and any(
+                match.group(0) == requested
+                or (not labelled_exercises and match.group(0).startswith(f"{requested}."))
+                for requested in requested_numbers
+            )
+        ]
     else:
-        raise ValueError("Could not produce an explanation with valid course citations. Please try a narrower topic.") from last_error
+        targets = (labelled_exercises or inventory) if assignment_mode else []
+
+    if targets:
+        parts: list[GeneratedExplanation] = []
+        for target in targets:
+            section_prompt = [
+                *prompt,
+                HumanMessage(content=(
+                    f"Generate the answer for this exercise only: {target['number']} — {target['excerpt']}. "
+                    "Do not solve or include any other exercise. Preserve the original number in the "
+                    "section heading. Return the complete solution code once and explain it in no more "
+                    "than 8 grouped walkthrough blocks. Keep definition and intuition to one sentence "
+                    "each. Address every subquestion under this exercise; leave shared examples, pitfalls, "
+                    "and check_question empty when they are not specific to this exercise."
+                )),
+            ]
+            parts.append(await _generate_valid_explanation(model, section_prompt, chunks))
+        explanation = _merge_exercise_explanations(parts) if len(parts) > 1 else parts[0]
+    else:
+        explanation = await _generate_valid_explanation(model, prompt, chunks)
     return {**state, "explanation": explanation.model_dump(mode="json"), "current_node": "explicateur"}

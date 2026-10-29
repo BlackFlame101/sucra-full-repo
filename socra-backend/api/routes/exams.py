@@ -11,6 +11,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from agents.exercise_generator import run_exercise_generator
+from agents.llm import provider_error_code, provider_error_message
 from db.exams import (
     complete_exam,
     create_exam,
@@ -151,7 +152,7 @@ class ExamStartRequest(BaseModel):
         max_length=5,
     )
     api_key: str = Field(default="", max_length=2000)
-    provider: Literal["google", "xai"] = "google"
+    provider: Literal["google", "groq"] = "google"
     model: str = Field(default="", max_length=120)
     language: Literal["fr", "en"] = "fr"
 
@@ -173,7 +174,7 @@ class ExamAnswerRequest(BaseModel):
 
 class ExamSubmitRequest(BaseModel):
     api_key: str = Field(default="", max_length=2000)
-    provider: Literal["google", "xai"] = "google"
+    provider: Literal["google", "groq"] = "google"
     model: str = Field(default="", max_length=120)
 
 
@@ -375,6 +376,12 @@ async def start_exam(
                     .eq("session_id", session_id).eq("course_id", course_id).eq("user_id", user_id).execute()
             except Exception:
                 logger.exception("Could not remove partial exam questions for session %s", session_id)
+        provider_code = provider_error_code(exc)
+        if provider_code:
+            raise HTTPException(
+                status_code=429 if provider_code in ("API_KEY_QUOTA_EXCEEDED", "API_RATE_LIMITED") else 502,
+                detail=f"{provider_code}: {provider_error_message(provider_code)}",
+            ) from exc
         raise HTTPException(
             status_code=422,
             detail="Socra could not verify every requested exam question from this course material. Try a shorter exam, a narrower topic, or check that the course includes values for calculation questions.",
@@ -483,5 +490,11 @@ async def submit_exam(
         completed = complete_exam(exam=exam, score=total_score, results=results)
     except Exception as exc:
         logger.exception("Exam grading failed for %s", exam_id)
+        provider_code = provider_error_code(exc)
+        if provider_code:
+            raise HTTPException(
+                status_code=429 if provider_code in ("API_KEY_QUOTA_EXCEEDED", "API_RATE_LIMITED") else 502,
+                detail=f"{provider_code}: {provider_error_message(provider_code)}",
+            ) from exc
         raise HTTPException(status_code=503, detail="Socra could not grade the exam reliably. Your answers are saved; try submitting again.") from exc
     return _public_exam(completed, exercises)

@@ -168,7 +168,7 @@ class GeneratedExplanation(BaseModel):
     definition: str = Field(min_length=10, max_length=3000)
     intuition: str = Field(min_length=10, max_length=3000)
     sections: list[ExplanationSection] = Field(min_length=1, max_length=30)
-    course_example: str = Field(min_length=10, max_length=3000)
+    course_example: str = Field(default="", max_length=3000)
     common_pitfalls: list[str] = Field(default_factory=list, max_length=8)
     citations: list[ExplanationCitation] = Field(min_length=1, max_length=8)
     check_question: str = Field(default="", max_length=1000)

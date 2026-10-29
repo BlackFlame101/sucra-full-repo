@@ -103,8 +103,9 @@ export type WSServerMessage =
   | { type: "correction"; content: PublicCorrection }
   | { type: "solution"; content: PublicSolution }
   | { type: "explanation"; content: PublicExplanation }
+  | { type: "progress"; content: { stage: string } }
   | { type: "done" }
-  | { type: "error"; content: string }
+  | { type: "error"; content: string | { code: string; message: string } }
 
 // ---------------------------------------------------------------------------
 // Client → server message shape
@@ -114,7 +115,7 @@ export interface WSClientMessage {
   message?: string
   courseId: string
   sessionId: string
-  /** Optional per-request overrides — currently Google Gemini or xAI Grok. */
+  /** Optional per-request overrides — currently Google Gemini or Groq. */
   apiKey?: string
   provider?: string
   model?: string

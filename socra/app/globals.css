@@ -170,6 +170,11 @@
   }
 }
 
+@keyframes progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;

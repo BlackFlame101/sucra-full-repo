@@ -444,7 +444,7 @@ async def main() -> int:
         default="",
     )
     parser.add_argument(
-        "--provider", choices=("google", "xai"), default="google",
+        "--provider", choices=("google", "groq"), default="google",
         help="Chat provider for this run (default: google).",
     )
     parser.add_argument(

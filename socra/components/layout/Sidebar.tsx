@@ -13,7 +13,6 @@ import {
   X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import type { CourseSession, Document } from "@/types"
 
 interface SidebarProps {
@@ -108,7 +107,7 @@ export function Sidebar({
         </Button>
       </div>
 
-      <ScrollArea className="flex-1 min-w-0 px-4">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4">
         {/* Resources Section */}
         <div className="py-3">
           <h3 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">
@@ -212,7 +211,7 @@ export function Sidebar({
                         type="button"
                         aria-label={`Rename ${session.title || "inquiry"}`}
                         title="Rename inquiry"
-                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-transparent text-muted-foreground opacity-0 shadow-sm transition-all hover:border-tertiary/50 hover:bg-tertiary/15 hover:text-tertiary group-hover/session:opacity-100 focus-visible:border-tertiary/50 focus-visible:bg-tertiary/15 focus-visible:text-tertiary focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tertiary/70"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/40 bg-background/60 text-muted-foreground shadow-sm transition-colors hover:border-tertiary/50 hover:bg-tertiary/15 hover:text-tertiary focus-visible:border-tertiary/50 focus-visible:bg-tertiary/15 focus-visible:text-tertiary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-tertiary/70"
                       >
                         <Pencil className="h-4 w-4" />
                       </button>
@@ -223,7 +222,7 @@ export function Sidebar({
             )}
           </div>
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Bottom Links */}
       <div className="border-t border-border/30 p-4 space-y-0.5">

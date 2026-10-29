@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo, lazy, Suspense } from "react"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
-import { Menu, PanelRightClose, PanelRightOpen } from "lucide-react"
+import { Menu, TriangleAlert, Settings } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Sidebar } from "@/components/layout/Sidebar"
@@ -140,6 +140,7 @@ export default function InquiryPage() {
   const [courseMaterials, setCourseMaterials] = useState<CourseContextMaterial[]>([])
   const [contextLoading, setContextLoading] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
 
   const handleContext = useCallback((evaluation: EvaluationResult) => {
@@ -149,6 +150,15 @@ export default function InquiryPage() {
   }, [])
 
   const handleChatError = useCallback((err: Error) => {
+    const code = (err as Error & { code?: string }).code
+    if (code?.startsWith("API_")) {
+      setApiKeyIssue({ code, message: err.message })
+      return
+    }
+    if (code === "GROQ_STRUCTURED_OUTPUT_FAILED") {
+      toast.error("Groq could not complete a valid answer", { description: err.message })
+      return
+    }
     toast.error("Tutor backend error", { description: err.message })
   }, [])
 
@@ -209,7 +219,7 @@ export default function InquiryPage() {
     [activeConfig.apiKey, activeConfig.provider, activeConfig.model]
   )
 
-  const { messages, status, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate } = useSocraChat({
+  const { messages, status, progress, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate } = useSocraChat({
     sessionId,
     courseId,
     language,
@@ -574,7 +584,16 @@ export default function InquiryPage() {
       )}
 
       {/* Center Chat Panel */}
-      <main className="flex-1 min-w-0">
+      <main className="min-w-0 flex-1 overflow-hidden">
+        {apiKeyIssue && (
+          <div role="alert" className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground sm:mx-6">
+            <div className="flex items-start gap-3">
+              <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+              <div><p className="font-semibold">{apiKeyIssue.code === "API_KEY_QUOTA_EXCEEDED" ? "AI API key usage limit reached" : apiKeyIssue.code === "API_KEY_INVALID" ? "AI API key was rejected" : apiKeyIssue.code === "API_RATE_LIMITED" ? "AI provider is rate-limiting requests" : "AI API key access problem"}</p><p className="mt-1 text-muted-foreground">{apiKeyIssue.message}</p></div>
+            </div>
+            <Button size="sm" onClick={() => setSettingsOpen(true)}><Settings className="mr-2 h-4 w-4" />Open Settings</Button>
+          </div>
+        )}
         <Suspense fallback={<ChatPanelFallback />}>
           <ChatPanel
             sessionTitle={sessionTitle}
@@ -583,6 +602,9 @@ export default function InquiryPage() {
             messages={messages}
             input={input}
             status={status}
+            progress={progress}
+            contextOpen={contextOpen}
+            onToggleContext={() => setContextOpen((open) => !open)}
             messagesLoading={messagesLoading}
             error={error}
             onInputChange={setInput}
@@ -610,34 +632,22 @@ export default function InquiryPage() {
         </Suspense>
       </main>
 
-      {/* Context panel toggle */}
-      <Button
-        variant="ghost"
-        size="icon"
-        className="fixed bottom-4 right-4 z-50 xl:hidden h-10 w-10 rounded-full bg-card border border-border/50 shadow-lg"
-        onClick={() => setContextOpen(!contextOpen)}
-      >
-        {contextOpen ? (
-          <PanelRightClose className="h-4 w-4" />
-        ) : (
-          <PanelRightOpen className="h-4 w-4" />
-        )}
-      </Button>
-
       {/* Right Context Panel */}
       <aside
         className={`${
-          contextOpen ? "translate-x-0" : "translate-x-full"
-        } fixed inset-y-14 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden transition-transform duration-200 xl:relative xl:inset-y-0 xl:translate-x-0 xl:w-72 shrink-0`}
+          contextOpen ? "translate-x-0 xl:w-72 xl:border-l" : "translate-x-full xl:translate-x-0 xl:w-0 xl:border-l-0"
+        } fixed inset-y-14 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden border-border/40 transition-[transform,width] duration-200 xl:relative xl:inset-y-0 xl:shrink-0`}
       >
-        <Suspense fallback={<ContextPanelFallback />}>
-          <ContextPanel
-            keyTerms={keyTerms}
-            suggestedReadings={suggestedReadings}
-            courseMaterials={courseMaterials}
-            isLoading={contextLoading}
-          />
-        </Suspense>
+        <div className="h-full w-72 overflow-hidden">
+          <Suspense fallback={<ContextPanelFallback />}>
+            <ContextPanel
+              keyTerms={keyTerms}
+              suggestedReadings={suggestedReadings}
+              courseMaterials={courseMaterials}
+              isLoading={contextLoading}
+            />
+          </Suspense>
+        </div>
       </aside>
 
       {/* Context panel overlay on mobile */}
@@ -654,7 +664,7 @@ export default function InquiryPage() {
         courseId={courseId}
         onUploadComplete={refreshDocuments}
       />
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={() => setApiKeyIssue(null)} />
     </div>
   )
 }

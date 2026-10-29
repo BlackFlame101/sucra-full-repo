@@ -1,10 +1,9 @@
 "use client"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { Bookmark, MoreVertical, RotateCcw, ArrowDown } from "lucide-react"
+import { Bookmark, MoreVertical, RotateCcw, ArrowDown, PanelRightClose, PanelRightOpen } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import { MessageList } from "./MessageList"
 import { ChatInput } from "./ChatInput"
 import { ExerciseCard } from "./ExerciseCard"
@@ -27,6 +26,7 @@ interface ChatPanelProps {
   messages: UIMessage[]
   input: string
   status: string
+  progress?: string
   messagesLoading: boolean
   error?: Error | null
   onInputChange: (value: string) => void
@@ -50,6 +50,8 @@ interface ChatPanelProps {
   onSaveSessionToLibrary: () => void
   sessionSavedToLibrary: boolean
   savingSessionToLibrary: boolean
+  contextOpen: boolean
+  onToggleContext: () => void
 }
 
 export function ChatPanel({
@@ -59,6 +61,7 @@ export function ChatPanel({
   messages,
   input,
   status,
+  progress,
   messagesLoading,
   error,
   onInputChange,
@@ -82,6 +85,8 @@ export function ChatPanel({
   onSaveSessionToLibrary,
   sessionSavedToLibrary,
   savingSessionToLibrary,
+  contextOpen,
+  onToggleContext,
 }: ChatPanelProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const didInitialScrollRef = useRef(false)
@@ -93,9 +98,7 @@ export function ChatPanel({
   })
 
   useEffect(() => {
-    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]'
-    )
+    const viewport = scrollAreaRef.current
     if (!viewport) return
     const updateScrollButton = () => {
       const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
@@ -114,9 +117,7 @@ export function ChatPanel({
   }, [messagesLoading])
 
   const scrollToBottom = () => {
-    const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-      '[data-slot="scroll-area-viewport"]'
-    )
+    const viewport = scrollAreaRef.current
     if (!viewport) return
     viewport.scrollTo({ top: viewport.scrollHeight, behavior: "smooth" })
     isNearBottomRef.current = true
@@ -130,9 +131,7 @@ export function ChatPanel({
     if (didInitialScrollRef.current && !isNearBottomRef.current) return
 
     const frame = requestAnimationFrame(() => {
-      const viewport = scrollAreaRef.current?.querySelector<HTMLElement>(
-        '[data-slot="scroll-area-viewport"]'
-      )
+      const viewport = scrollAreaRef.current
       if (!viewport) return
       viewport.scrollTop = viewport.scrollHeight
       didInitialScrollRef.current = true
@@ -144,9 +143,9 @@ export function ChatPanel({
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* Chat Header */}
-      <div className="flex items-center justify-between border-b border-border/40 px-4 sm:px-6 py-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <h2 className="font-serif text-lg font-medium italic truncate">
+      <div className="flex flex-col gap-3 border-b border-border/40 px-4 py-3 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
+          <h2 className="min-w-0 flex-1 truncate font-serif text-lg font-medium italic">
             {learningMode === "socratic" ? "Socratic Dialogue" : learningMode === "exercise" ? "Practice Exercises" : "Explain a Topic"}: {sessionTitle}
           </h2>
           <Badge
@@ -156,13 +155,13 @@ export function ChatPanel({
             Active Session
           </Badge>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 xl:shrink-0 xl:justify-end">
           <Select value={language} onValueChange={(value) => onLanguageChange(value as "fr" | "en")}>
-            <SelectTrigger className="w-28" aria-label="Response language"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-28 max-w-full" aria-label="Response language"><SelectValue /></SelectTrigger>
             <SelectContent><SelectItem value="fr">Français</SelectItem><SelectItem value="en">English</SelectItem></SelectContent>
           </Select>
           <Select value={learningMode} onValueChange={(value) => onLearningModeChange(value as LearningMode)}>
-            <SelectTrigger className="w-44" aria-label="Learning mode">
+            <SelectTrigger className="w-44 max-w-full" aria-label="Learning mode">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -187,16 +186,20 @@ export function ChatPanel({
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
             <MoreVertical className="h-4 w-4" />
           </Button>
+          <Button type="button" variant="outline" size="icon" className="h-8 w-8 shrink-0" onClick={onToggleContext} aria-label={contextOpen ? "Hide course context" : "Show course context"} title={contextOpen ? "Hide course context" : "Show course context"}>
+            {contextOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+          </Button>
         </div>
       </div>
 
       {/* Messages */}
-      <ScrollArea ref={scrollAreaRef} className="flex-1 min-h-0">
-        <div className="flex flex-col pb-2">
+      <div ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+        <div className="flex w-full min-w-0 max-w-full flex-col overflow-x-hidden pb-2">
           <MessageList
             messages={messages}
             isLoading={messagesLoading}
             status={status}
+            progress={progress}
             renderAfterMessage={(message) => {
               if (message.role !== "assistant") return null
               const metadata = (message as UIMessage & { metadata?: Record<string, unknown> }).metadata
@@ -204,7 +207,7 @@ export function ChatPanel({
               const messageCorrection = metadata?.correction as PublicCorrection | undefined
               const messageExplanation = metadata?.explanation as PublicExplanation | undefined
               return (
-                <div className="flex flex-col gap-4">
+                <div className="flex w-full min-w-0 max-w-full flex-col gap-4">
                   {messageExercise && <ExerciseCard key={messageExercise.id} exercise={messageExercise} onNextExercise={onNextExercise} onSubmitAttempt={onSubmitAttempt} disabled={status !== "ready"} submissionLocked={solution?.exercise_id === messageExercise.id} />}
                   {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} onSaveToNotebook={onSaveExerciseToNotebook} disabled={status !== "ready"} />}
                   {messageExplanation && <ExplanationCard explanation={messageExplanation} onDiscuss={onDiscussExplanation} onSaveToLibrary={onSaveExplanationToLibrary} onSaveToNotebook={onSaveExplanationToNotebook} disabled={status !== "ready"} />}
@@ -213,7 +216,7 @@ export function ChatPanel({
             }}
           />
           {exercise && !activeExerciseIsInHistory && (
-            <div className="flex flex-col gap-4">
+            <div className="flex w-full min-w-0 max-w-full flex-col gap-4">
               <ExerciseCard
                 key={exercise.id}
                 exercise={exercise}
@@ -225,7 +228,7 @@ export function ChatPanel({
             </div>
           )}
         </div>
-      </ScrollArea>
+      </div>
       {showScrollToBottom && (
         <Button
           type="button"

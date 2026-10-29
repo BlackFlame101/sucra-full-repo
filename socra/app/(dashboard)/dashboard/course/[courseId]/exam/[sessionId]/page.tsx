@@ -3,12 +3,13 @@
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { useParams, useSearchParams } from "next/navigation"
-import { ArrowLeft, ArrowRight, BookOpen, Bookmark, CheckCircle2, ClipboardCheck, LoaderCircle, SkipForward } from "lucide-react"
+import { ArrowLeft, ArrowRight, BookOpen, Bookmark, CheckCircle2, ClipboardCheck, LoaderCircle, Settings, SkipForward, TriangleAlert } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useUserSettings } from "@/hooks/useUserSettings"
+import { SettingsDialog } from "@/components/settings/SettingsDialog"
 import type { CourseExam, ExamQuestion } from "@/lib/exams"
 import { toast } from "sonner"
 
@@ -92,7 +93,9 @@ export default function MixedExamPage() {
   const [answer, setAnswer] = useState("")
   const [initializing, setInitializing] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [busyMessage, setBusyMessage] = useState("")
   const [error, setError] = useState("")
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [sessionSavedToLibrary, setSessionSavedToLibrary] = useState(false)
   const [savingSessionToLibrary, setSavingSessionToLibrary] = useState(false)
   const [language, setLanguage] = useState<"fr" | "en">("fr")
@@ -175,8 +178,8 @@ export default function MixedExamPage() {
   }, [currentQuestion, exam])
 
   const modelOptions = () => {
-    const provider = activeConfig.provider === "xai" ? "xai" : "google"
-    const supportsProvider = activeConfig.provider === "google" || activeConfig.provider === "xai"
+    const provider = activeConfig.provider === "groq" ? "groq" : "google"
+    const supportsProvider = activeConfig.provider === "google" || activeConfig.provider === "groq"
     return {
       provider,
       api_key: supportsProvider ? activeConfig.apiKey ?? "" : "",
@@ -195,6 +198,7 @@ export default function MixedExamPage() {
 
   const startExam = async () => {
     setBusy(true)
+    setBusyMessage("Creating and verifying your exam")
     setError("")
     try {
       await saveLanguage(language)
@@ -222,6 +226,7 @@ export default function MixedExamPage() {
       setError(cause instanceof Error ? cause.message : "Could not build a verified exam.")
     } finally {
       setBusy(false)
+      setBusyMessage("")
     }
   }
 
@@ -266,6 +271,7 @@ export default function MixedExamPage() {
 
   const submitExam = async () => {
     if (!exam) return
+    setBusyMessage("Grading your answers")
     await saveLanguage(language)
     const response = await fetch(`/api/exams/${encodeURIComponent(exam.id)}`, {
       method: "POST",
@@ -393,7 +399,13 @@ export default function MixedExamPage() {
         </Select>
       </div>
 
-      {error && <div role="alert" className="mb-6 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}
+      {error.startsWith("API_") ? (
+        <div role="alert" className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground">
+          <div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" /><div><p className="font-semibold">{error.startsWith("API_KEY_QUOTA_EXCEEDED:") ? "AI API key usage limit reached" : error.startsWith("API_KEY_INVALID:") ? "AI API key was rejected" : error.startsWith("API_RATE_LIMITED:") ? "AI provider is rate-limiting requests" : "AI API key access problem"}</p><p className="mt-1 text-muted-foreground">{error.slice(error.indexOf(":") + 1).trim()}</p></div></div>
+          <Button size="sm" onClick={() => setSettingsOpen(true)}><Settings className="mr-2 h-4 w-4" />Open Settings</Button>
+        </div>
+      ) : error && <div role="alert" className="mb-6 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}
+      {busy && busyMessage && <ExamProgress message={busyMessage} />}
       {exam && missingQuestionTypes.length > 0 && (
         <div role="status" className="mb-6 rounded-xl border border-secondary/30 bg-secondary/5 p-4 text-sm text-muted-foreground">
           This course material could not support {missingQuestionTypes.join(", ")} questions, so Socra filled the exam with other verified formats.
@@ -649,6 +661,34 @@ export default function MixedExamPage() {
       ) : (
         <section className="rounded-2xl border border-border/60 bg-card/40 p-6 text-sm text-muted-foreground">This exam has no available questions. Return to the course and create another exam.</section>
       )}
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={() => setError("")} />
     </main>
+  )
+}
+
+function ExamProgress({ message }: { message: string }) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const started = Date.now()
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const elapsedLabel = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`
+  return (
+    <div role="status" aria-live="polite" className="mb-6 rounded-xl border border-secondary/30 bg-secondary/5 p-4">
+      <div className="flex items-center gap-3">
+        <LoaderCircle className="h-5 w-5 shrink-0 animate-spin text-secondary" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span className="font-medium">{message}…</span>
+            <span className="text-xs tabular-nums text-muted-foreground">Elapsed {elapsedLabel}</span>
+          </div>
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary/15">
+            <div className="h-full w-1/3 animate-[progress-slide_1.6s_ease-in-out_infinite] rounded-full bg-secondary" />
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">Checking each question against your course. This may take a little while; the result will appear here when it is ready.</p>
+        </div>
+      </div>
+    </div>
   )
 }

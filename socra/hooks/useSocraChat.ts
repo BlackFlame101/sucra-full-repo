@@ -35,7 +35,7 @@ export type ChatStatus = "ready" | "connecting" | "submitted" | "streaming" | "e
 interface UseSocraChatOpts {
   sessionId: string
   courseId: string
-  /** Optional per-request LLM config from the Settings dialog. Google and xAI
+  /** Optional per-request LLM config from the Settings dialog. Google and Groq
    *  are forwarded to the backend; other providers are not yet supported there. */
   llmConfig?: { apiKey?: string; provider?: string; model?: string }
   language: "fr" | "en"
@@ -51,6 +51,7 @@ interface UseSocraChatOpts {
 interface UseSocraChatReturn {
   messages: UIMessage[]
   status: ChatStatus
+  progress: string
   error: Error | null
   sendMessage: (m: { text: string; displayText?: string; mode?: LearningMode }) => void
   submitAttempt: (attempt: { exerciseId: string; answer: string; hintsUsed: number }) => void
@@ -115,6 +116,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
   // Start in "ready" so the chat input is enabled right away — the WS only
   // opens lazily when the user actually sends a message.
   const [status, setStatus] = useState<ChatStatus>("ready")
+  const [progress, setProgress] = useState("")
   const [error, setError] = useState<Error | null>(null)
 
   const socketRef = useRef<WebSocket | null>(null)
@@ -240,12 +242,20 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           }
           case "done": {
             turnInFlightRef.current = false
+            setProgress("")
             setStatus("ready")
+            break
+          }
+          case "progress": {
+            setProgress(msg.content.stage)
             break
           }
           case "error": {
             turnInFlightRef.current = false
-            const e = new Error(msg.content || "Backend error")
+            setProgress("")
+            const content = msg.content
+            const e = new Error(typeof content === "string" ? content || "Backend error" : content.message)
+            if (typeof content !== "string") Object.assign(e, { code: content.code })
             setStatus("error")
             setError(e)
             onErrorRef.current?.(e)
@@ -267,6 +277,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
       const mode = m.mode ?? "socratic"
       const displayText = (m.displayText ?? text).trim().slice(0, 500) || text.slice(0, 500)
       setError(null)
+      setProgress(mode === "explain" ? "Reviewing your course material…" : mode === "exercise" ? "Finding relevant course material…" : "Connecting to your tutor…")
       lastUserTextRef.current = text
       lastDisplayTextRef.current = displayText
       lastModeRef.current = mode
@@ -281,7 +292,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           pendingMessageRef.current = null
           const cfg = llmConfigRef.current
           // Only forward keys for providers supported by the Python backend.
-          const forwardKey = cfg?.provider === "google" || cfg?.provider === "xai" ? cfg : undefined
+          const forwardKey = cfg?.provider === "google" || cfg?.provider === "groq" ? cfg : undefined
           let accessToken: string | undefined
           if (pending.mode === "exercise" || pending.mode === "explain") {
             const { data, error: authError } = await createClient().auth.getSession()
@@ -343,6 +354,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
       }
       turnInFlightRef.current = true
       setError(null)
+      setProgress("Reviewing your answer…")
       setStatus("submitted")
       setMessages((prev) => [...prev, makeUserMessage(displayAnswer), makeAssistantStub()])
       ensureSocket()
@@ -352,7 +364,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
             throw new Error("Sign in again before submitting an answer.")
           }
           const cfg = llmConfigRef.current
-          const forwardKey = cfg?.provider === "google" || cfg?.provider === "xai" ? cfg : undefined
+          const forwardKey = cfg?.provider === "google" || cfg?.provider === "groq" ? cfg : undefined
           ws.send(JSON.stringify({
             action: "submit_attempt",
             exerciseId,
@@ -456,6 +468,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
   return {
     messages,
     status,
+    progress,
     error,
     sendMessage,
     submitAttempt,

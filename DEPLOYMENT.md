@@ -15,6 +15,7 @@ Both services use the existing Supabase project. Do not create a new Supabase pr
    - `SUPABASE_URL`: the project URL from Supabase project settings.
    - `SUPABASE_SERVICE_ROLE_KEY`: the server-side service-role/secret key from Supabase. Keep it private.
    - `GEMINI_API_KEY`: the Gemini key used by the backend.
+   - `GROQ_API_KEY`: optional server-side Groq key for the Groq provider.
    - `FRONTEND_URL`: the exact production origin for the Vercel site, for example `https://my-socra-project.vercel.app` (no trailing slash).
 4. Wait until the service is live, then open `https://<render-service>.onrender.com/health`. A successful response confirms the backend started.
 
@@ -32,6 +33,7 @@ Add these variables for the **Production** environment (and Preview too if you w
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Existing Supabase publishable/anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Existing Supabase service-role/secret key; server-side only |
 | `GEMINI_API_KEY` | Gemini key used for frontend upload embeddings and model calls |
+| `GROQ_API_KEY` | Optional Groq key used by the backend when configured as a server fallback |
 | `SOCRA_BACKEND_URL` | `https://<render-service>.onrender.com` |
 | `NEXT_PUBLIC_BACKEND_WS_URL` | `wss://<render-service>.onrender.com` |
 | `NEXT_PUBLIC_APP_URL` | The production Vercel origin, for example `https://my-socra-project.vercel.app` |

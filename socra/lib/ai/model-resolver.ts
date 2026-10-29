@@ -2,7 +2,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createAnthropic } from "@ai-sdk/anthropic"
 
-export type Provider = "google" | "openai" | "anthropic" | "xai"
+export type Provider = "google" | "openai" | "anthropic" | "groq"
 
 export interface ModelConfig {
   provider?: Provider
@@ -59,14 +59,19 @@ export const PROVIDERS: ProviderInfo[] = [
     keyPrefix: "sk-ant-",
   },
   {
-    id: "xai",
-    label: "xAI Grok",
+    id: "groq",
+    label: "Groq",
     models: [
-      { id: "grok-4.7", label: "Grok 4.7" },
-      { id: "grok-4.6", label: "Grok 4.6" },
+      { id: "openai/gpt-oss-120b", label: "GPT OSS 120B" },
+      { id: "openai/gpt-oss-20b", label: "GPT OSS 20B" },
+      { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B (Enterprise access)" },
+      { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B Instant (Enterprise access)" },
+      { id: "qwen/qwen3.8-27b", label: "Qwen 3.8 27B (Preview)" },
+      { id: "meta-models/muse-spark-open", label: "Muse Spark Open (Preview)" },
+      { id: "minimaxai/minimax-m2.7", label: "MiniMax M2.7 (Preview, Enterprise access)" },
     ],
-    keyPlaceholder: "xai-...",
-    keyPrefix: "xai-",
+    keyPlaceholder: "gsk_...",
+    keyPrefix: "gsk_",
   },
 ]
 
@@ -88,11 +93,11 @@ export function resolveModel(config?: ModelConfig) {
       return createAnthropic({ apiKey: config.apiKey })(
         config.model ?? "claude-sonnet-4-20250514"
       )
-    case "xai":
+    case "groq":
       return createOpenAI({
         apiKey: config.apiKey,
-        baseURL: "https://api.x.ai/v1",
-      })(config.model ?? "grok-4.7")
+        baseURL: "https://api.groq.com/openai/v1",
+      })(config.model ?? "openai/gpt-oss-120b")
     case "google":
     default:
       return createGoogleGenerativeAI({ apiKey: config.apiKey })(

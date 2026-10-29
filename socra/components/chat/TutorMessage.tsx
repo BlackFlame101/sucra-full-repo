@@ -42,7 +42,7 @@ function formatTutorContent(content: string) {
 
 export function TutorMessage({ content, isStreaming }: TutorMessageProps) {
   return (
-    <div className="flex gap-3 max-w-[85%]">
+    <div className="flex min-w-0 max-w-[85%] gap-3">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary/15 mt-1">
         <Bot className="h-4 w-4 text-secondary" />
       </div>
@@ -56,7 +56,7 @@ export function TutorMessage({ content, isStreaming }: TutorMessageProps) {
             </span>
           )}
         </span>
-        <div className="rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3">
+        <div className="min-w-0 max-w-full rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3">
           <div className="font-serif text-[15px] leading-relaxed text-foreground/90">
             {formatTutorContent(content)}
             {isStreaming && (

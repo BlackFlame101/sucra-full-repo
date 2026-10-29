@@ -4,12 +4,14 @@ import type { ReactNode } from "react"
 import { Message } from "./Message"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Bot } from "lucide-react"
+import { useEffect, useState } from "react"
 import type { UIMessage } from "ai"
 
 interface MessageListProps {
   messages: UIMessage[]
   isLoading?: boolean
   status?: string
+  progress?: string
   renderAfterMessage?: (message: UIMessage) => ReactNode
 }
 
@@ -20,7 +22,14 @@ function getMessageText(message: UIMessage): string {
     .join("")
 }
 
-function TypingIndicator() {
+function TypingIndicator({ progress }: { progress?: string }) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const started = Date.now()
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const elapsedLabel = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`
   return (
     <div className="flex gap-3 max-w-[85%]">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary/15 mt-1">
@@ -31,10 +40,14 @@ function TypingIndicator() {
           Socra Tutor
         </span>
         <div className="rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3">
-          <div className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse" />
-            <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.2s]" />
-            <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.4s]" />
+          <div className="flex items-center gap-2.5">
+            <span className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse" />
+              <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.2s]" />
+              <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.4s]" />
+            </span>
+            <span className="text-xs text-muted-foreground">{progress || "Working…"}</span>
+            <span className="border-l border-border/60 pl-2 text-[11px] tabular-nums text-muted-foreground/80">{elapsedLabel}</span>
           </div>
         </div>
       </div>
@@ -76,7 +89,7 @@ function EmptyState() {
   )
 }
 
-export function MessageList({ messages, isLoading, status, renderAfterMessage }: MessageListProps) {
+export function MessageList({ messages, isLoading, status, progress, renderAfterMessage }: MessageListProps) {
   if (isLoading) return <MessageSkeleton />
   if (messages.length === 0) return <EmptyState />
 
@@ -90,7 +103,7 @@ export function MessageList({ messages, isLoading, status, renderAfterMessage }:
     status === "submitted" || (status === "streaming" && lastIsEmptyAssistant)
 
   return (
-    <div className="flex flex-col gap-6 p-4 sm:p-6">
+    <div className="flex w-full min-w-0 max-w-full flex-col gap-6 overflow-x-hidden p-4 sm:p-6">
       {messages.map((message) => (
         <div key={message.id} className="contents">
           <Message
@@ -102,7 +115,7 @@ export function MessageList({ messages, isLoading, status, renderAfterMessage }:
           {renderAfterMessage?.(message)}
         </div>
       ))}
-      {showTypingIndicator && <TypingIndicator />}
+      {showTypingIndicator && <TypingIndicator progress={progress} />}
     </div>
   )
 }

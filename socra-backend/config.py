@@ -17,7 +17,7 @@ class Settings(BaseModel):
         default_factory=lambda: os.environ["SUPABASE_SERVICE_ROLE_KEY"]
     )
     gemini_api_key: str = Field(default_factory=lambda: os.environ["GEMINI_API_KEY"])
-    xai_api_key: str = Field(default_factory=lambda: os.environ.get("XAI_API_KEY", ""))
+    groq_api_key: str = Field(default_factory=lambda: os.environ.get("GROQ_API_KEY", ""))
 
     backend_port: int = Field(
         default_factory=lambda: int(os.environ.get("BACKEND_PORT", "8000"))

@@ -33,16 +33,17 @@ import { useUserSettings, type ApiKeys, type ModelPref } from "@/hooks/useUserSe
 import { toast } from "sonner"
 
 
-// Gemini and xAI Grok are wired through to the Python backend.
-const SUPPORTED_PROVIDERS: ReadonlySet<Provider> = new Set<Provider>(["google", "xai"])
+// Gemini and Groq are wired through to the Python backend.
+const SUPPORTED_PROVIDERS: ReadonlySet<Provider> = new Set<Provider>(["google", "groq"])
 const COMING_SOON_TOOLTIP = "Coming soon — this provider is not wired to the tutor backend yet."
 
 interface SettingsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  onSaved?: () => void
 }
 
-export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogProps) {
   const {
     apiKeys,
     modelPref,
@@ -90,6 +91,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         ? "Your API key and model preference have been saved."
         : "Settings cleared. Using default server key.",
     })
+    onSaved?.()
     onOpenChange(false)
   }
 
@@ -100,6 +102,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     toast.success("Settings cleared", {
       description: "Reverted to default server API key.",
     })
+    onSaved?.()
     onOpenChange(false)
   }
 
@@ -240,7 +243,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               <div className="flex items-start gap-2 rounded-lg bg-muted/50 border border-border/50 p-3">
                 <Info className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
                 <p className="text-xs text-muted-foreground">
-                  Add a Gemini or xAI Grok API key above to choose a model.
+                  Add a Gemini or Groq API key above to choose a model.
                   Without a key, the server uses its default Gemini 3.5 Flash-Lite key.
                 </p>
               </div>

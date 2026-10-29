@@ -7,7 +7,7 @@ Protocol::
         "courseId":  uuid,
         "sessionId": uuid,
         "apiKey":    str | null,    # optional - provider API key override
-        "provider":  str | null,    # google (default) or xai
+        "provider":  str | null,    # google (default) or groq
         "model":     str | null,    # optional - overrides provider default model
         "mode":      str | null,    # socratic (default) or exercise
         "action":    str | null,    # message (default), submit_attempt, reveal_solution
@@ -22,6 +22,7 @@ Protocol::
                        { "type": "explanation", "content": GeneratedExplanation } (explain mode)
                        { "type": "correction", "content": PublicCorrection }   (after attempt)
                        { "type": "solution",   "content": PublicSolution }     (after attempt + explicit reveal)
+                       { "type": "progress",   "content": { "stage": str } } (while preparing structured responses)
                        { "type": "done" }                                       (always)
                        { "type": "error",      "content": "<message>" }        (on failure)
 """
@@ -34,6 +35,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from agents.llm import provider_error_code, provider_error_message
 from agents.tuteur_socratique import TUTEUR_LLM_TAG
 from db import messages as messages_db
 from db import profiles as profiles_db
@@ -333,7 +335,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             client_api_key = str(payload.get("apiKey") or "").strip()
             client_model = str(payload.get("model") or "").strip()
             client_provider = str(payload.get("provider") or "").strip().lower()
-            if client_provider not in ("google", "xai"):
+            if client_provider not in ("google", "groq"):
                 client_api_key = ""
                 client_model = ""
                 client_provider = "google"
@@ -394,10 +396,36 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             exercise_result: dict[str, Any] | None = None
             correction_result: dict[str, Any] | None = None
             sent_diagnostic = False
+            active_generation_node = ""
+            generation_model_calls = 0
 
             try:
                 async for ev in graph.astream_events(initial_state, version="v2"):
                     kind = ev.get("event")
+                    event_name = ev.get("name")
+
+                    if kind == "on_chain_start" and event_name in (
+                        "diagnostiqueur", "exercise_generator", "explicateur", "correcteur",
+                    ):
+                        active_generation_node = str(event_name)
+                        generation_model_calls = 0
+                        progress_stage = {
+                            "diagnostiqueur": "Reviewing the course material…",
+                            "exercise_generator": "Finding relevant course material…",
+                            "explicateur": "Gathering course pages and citations…",
+                            "correcteur": "Reviewing your answer…",
+                        }[active_generation_node]
+                        await _send(ws, {"type": "progress", "content": {"stage": progress_stage}})
+
+                    elif kind == "on_chat_model_start" and active_generation_node in ("exercise_generator", "explicateur", "correcteur"):
+                        generation_model_calls += 1
+                        if active_generation_node == "explicateur":
+                            progress_stage = "Drafting the explanation…" if generation_model_calls == 1 else "Working through the explanation…"
+                        elif active_generation_node == "exercise_generator":
+                            progress_stage = "Creating a course-based question…" if generation_model_calls == 1 else "Verifying the question against your course…"
+                        else:
+                            progress_stage = "Preparing feedback…"
+                        await _send(ws, {"type": "progress", "content": {"stage": progress_stage}})
 
                     # Stream Tuteur tokens to the client as they arrive.
                     if kind == "on_chat_model_stream":
@@ -429,23 +457,27 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                             if diag:
                                 await _send(ws, {"type": "diagnostic", "content": diag})
                                 sent_diagnostic = True
+                            active_generation_node = ""
 
                         if name == "exercise_generator" and isinstance(data_out, dict):
                             exercise = data_out.get("exercise")
                             if exercise:
                                 exercise_result = exercise
                                 await _send(ws, {"type": "exercise", "content": exercise})
+                            active_generation_node = ""
 
                         if name == "explicateur" and isinstance(data_out, dict):
                             explanation = data_out.get("explanation")
                             if explanation:
                                 await _send(ws, {"type": "explanation", "content": explanation})
+                            active_generation_node = ""
 
                         if name == "correcteur" and isinstance(data_out, dict):
                             correction = data_out.get("correction")
                             if correction:
                                 correction_result = correction
                                 await _send(ws, {"type": "correction", "content": correction})
+                            active_generation_node = ""
 
                         # The whole graph finishing — capture the final state.
                         if name in ("LangGraph", "__start__") and isinstance(data_out, dict):
@@ -453,7 +485,14 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
 
             except Exception as exc:
                 logger.exception("Graph execution failed: %s", exc)
-                await _send(ws, {"type": "error", "content": str(exc)})
+                provider_code = provider_error_code(exc)
+                if provider_code:
+                    await _send(ws, {"type": "error", "content": {
+                        "code": provider_code,
+                        "message": provider_error_message(provider_code),
+                    }})
+                else:
+                    await _send(ws, {"type": "error", "content": str(exc)})
                 continue
 
             # --------------------------------------------------------------

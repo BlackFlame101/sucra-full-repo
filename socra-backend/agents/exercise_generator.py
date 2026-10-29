@@ -981,13 +981,21 @@ def public_exercise(exercise_id: str, exercise: GeneratedExercise) -> dict[str, 
     ).model_dump(mode="json")
 
 
-def _model_for(state: SocraState, *, temperature: float):
+def _model_for(
+    state: SocraState,
+    *,
+    temperature: float,
+    response_schema: dict[str, Any] | None = None,
+    max_completion_tokens: int | None = None,
+):
     return get_chat_llm(
         temperature=temperature,
         streaming=False,
         api_key=state.get("api_key"),
         model=state.get("model"),
         provider=state.get("provider"),
+        response_schema=response_schema,
+        max_completion_tokens=max_completion_tokens,
     )
 
 

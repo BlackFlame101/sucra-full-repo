@@ -29,11 +29,14 @@ import {
   MessageCircleQuestionMark,
   PanelsTopLeft,
   Sparkles,
+  Settings,
+  TriangleAlert,
 } from "lucide-react"
 import { toast } from "sonner"
 import { createClient } from "@/lib/supabase/client"
 
 import { Button } from "@/components/ui/button"
+import { SettingsDialog } from "@/components/settings/SettingsDialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -93,8 +96,11 @@ export default function DiagnosticPage() {
   const [phase, setPhase] = useState<Phase>("picking")
   const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null)
   const [tutorOpening, setTutorOpening] = useState("")
+  const [progressMessage, setProgressMessage] = useState("Preparing your request…")
   const [modeResultReady, setModeResultReady] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const wsRef = useRef<WebSocket | null>(null)
   const { getActiveConfig } = useUserSettings()
 
@@ -185,6 +191,7 @@ export default function DiagnosticPage() {
     setDiagnostic(null)
     setTutorOpening("")
     setPhase("thinking")
+    setProgressMessage(learningMode === "explain" ? "Reviewing your course material…" : learningMode === "exercise" ? "Finding relevant course material…" : "Reviewing the course material…")
 
     const languageResponse = await fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
@@ -212,7 +219,7 @@ export default function DiagnosticPage() {
       void (async () => {
         try {
           const cfg = getActiveConfig()
-          const forwardKey = cfg.provider === "google" || cfg.provider === "xai" ? cfg : undefined
+          const forwardKey = cfg.provider === "google" || cfg.provider === "groq" ? cfg : undefined
           let accessToken: string | undefined
           if (learningMode === "exercise" || learningMode === "explain") {
             const { data, error } = await createClient().auth.getSession()
@@ -268,13 +275,23 @@ export default function DiagnosticPage() {
         case "context":
           // Not expected on the first turn, ignore.
           break
+        case "progress":
+          setProgressMessage(parsed.content.stage)
+          break
         case "done":
           setPhase("ready")
           // Eagerly close — we'll get a fresh socket on the inquiry page.
           ws.close(1000, "diagnostic done")
           break
         case "error":
-          setErrorMessage(parsed.content || "Something went wrong")
+          if (typeof parsed.content === "string") {
+            setErrorMessage(parsed.content || "Something went wrong")
+          } else {
+            setApiKeyIssue(parsed.content.code.startsWith("API_")
+              ? { code: parsed.content.code, message: parsed.content.message || "Check the AI API key in Settings." }
+              : null)
+            setErrorMessage(parsed.content.message || "Something went wrong")
+          }
           setPhase("error")
           break
       }
@@ -301,6 +318,7 @@ export default function DiagnosticPage() {
     setTutorOpening("")
     setModeResultReady(false)
     setErrorMessage(null)
+    setApiKeyIssue(null)
   }
 
   // ----------------------------------------------------------------
@@ -408,9 +426,9 @@ export default function DiagnosticPage() {
               <TutorOpeningCard text={tutorOpening} visible={phase === "diagnosed" || phase === "ready"} streaming={phase === "diagnosed"} />
             </>
           ) : (
-            <div className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
+            <div role={phase === "thinking" ? "status" : undefined} aria-live={phase === "thinking" ? "polite" : undefined} className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
               {phase === "thinking"
-                ? learningMode === "explain" ? "Preparing your course-grounded explanation…" : "Preparing your verified practice question…"
+                ? <span className="flex items-center gap-3"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-secondary" />{progressMessage}</span>
                 : modeResultReady
                   ? learningMode === "explain" ? "Your explanation is ready. Continue to view it with its course citations." : "Your practice question is ready. Continue to view it."
                   : "Your selected learning mode is processing your request."}
@@ -448,9 +466,15 @@ export default function DiagnosticPage() {
                     ? "Explanation could not be prepared"
                     : "Diagnostic could not complete"}
               </h3>
-              <p className="text-sm text-muted-foreground">
-                {errorMessage || "An unknown error occurred."}
-              </p>
+              {apiKeyIssue ? (
+                <div role="alert" className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+                  <TriangleAlert className="h-5 w-5 shrink-0 text-amber-600" />
+                  <div className="flex-1"><p className="font-medium text-foreground">{apiKeyIssue.code === "API_KEY_QUOTA_EXCEEDED" ? "AI API key usage limit reached" : apiKeyIssue.code === "API_KEY_INVALID" ? "AI API key was rejected" : apiKeyIssue.code === "API_RATE_LIMITED" ? "AI provider is rate-limiting requests" : "AI API key access problem"}</p><p className="mt-1 text-muted-foreground">{apiKeyIssue.message}</p></div>
+                  <Button size="sm" onClick={() => setSettingsOpen(true)}><Settings className="mr-2 h-4 w-4" />Open Settings</Button>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">{errorMessage || "An unknown error occurred."}</p>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
@@ -470,6 +494,7 @@ export default function DiagnosticPage() {
           </div>
         </div>
       )}
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={() => setApiKeyIssue(null)} />
     </div>
   )
 }
