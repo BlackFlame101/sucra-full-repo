@@ -16,6 +16,23 @@ function load(path, dependencies) {
   return exports
 }
 
+test("sign-out confirms completion without a fetch redirect and reports failures", async () => {
+  for (const error of [null, new Error("provider unavailable")]) {
+    const deleted = []
+    class TestResponse extends Response {
+      cookies = { delete: (name) => deleted.push(name) }
+    }
+    const { POST } = load("app/api/auth/signout/route.ts", {
+      "@/lib/supabase/server": { createClient: async () => ({ auth: { signOut: async () => ({ error }) } }) },
+      "next/server": { NextResponse: TestResponse },
+    })
+    const response = await POST()
+    assert.equal(response.status, error ? 503 : 204)
+    assert.equal(response.headers.get("location"), null)
+    assert.deepEqual(deleted, error ? [] : ["socra_recovery"])
+  }
+})
+
 test("PDF polling backs off, pauses while hidden and stops at completion", async (t) => {
   const tab = Object.assign(new EventTarget(), { hidden: false })
   const clock = t.mock.timers

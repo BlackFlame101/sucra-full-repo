@@ -2,7 +2,8 @@
 
 import { useState } from "react"
 import Link from "next/link"
-import { usePathname, useRouter } from "next/navigation"
+import { usePathname } from "next/navigation"
+import { toast } from "sonner"
 import { Bell, LogOut, Settings, User as UserIcon, HelpCircle, Menu } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
@@ -54,13 +55,21 @@ function getInitials(name: string): string {
 
 export function DashboardNavbar({ user }: { user: NavUser }) {
   const pathname = usePathname()
-  const router = useRouter()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
 
   const handleSignOut = async () => {
-    await fetch("/api/auth/signout", { method: "POST" })
-    router.push("/login")
+    if (signingOut) return
+    setSigningOut(true)
+    try {
+      const response = await fetch("/api/auth/signout", { method: "POST", redirect: "error" })
+      if (response.status !== 204) throw new Error("Sign-out request failed")
+      window.location.replace("/login")
+    } catch {
+      setSigningOut(false)
+      toast.error("Could not sign out. Please try again.")
+    }
   }
 
   return (
@@ -224,10 +233,11 @@ export function DashboardNavbar({ user }: { user: NavUser }) {
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 variant="destructive"
-                onClick={handleSignOut}
+                disabled={signingOut}
+                onSelect={() => void handleSignOut()}
               >
                 <LogOut className="mr-2 h-4 w-4" />
-                <span>Sign out</span>
+                <span>{signingOut ? "Signing out…" : "Sign out"}</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
