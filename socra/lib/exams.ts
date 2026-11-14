@@ -43,7 +43,10 @@ export interface ExamResult {
 
 export interface CourseExam {
   id: string
-  status: "in_progress" | "completed"
+  status: "preparing" | "preparation_failed" | "in_progress" | "grading" | "grading_failed" | "completed"
+  question_count?: number
+  progress?: { completed: number; total: number }
+  error?: string | null
   topic: string
   requested_types: ExamQuestion["exercise_type"][]
   questions: ExamQuestion[]

@@ -5,6 +5,7 @@ import unittest
 from uuid import uuid4
 
 from agents.evaluateur import _fallback_key_terms
+from agents.evaluateur import _normalise_evaluation
 from agents.structured_output import message_text, parse_json_object
 from agents.exercise_generator import (
     _validate_type_specific,
@@ -240,3 +241,14 @@ class StructuredOutputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuggestedReadingTests(unittest.TestCase):
+    def test_suggested_readings_use_real_source_content(self):
+        source = {"document_id": "doc", "filename": "course.pdf", "page_number": 3, "content": "Grounded course passage."}
+        result = _normalise_evaluation({"suggested_readings": [
+            {"document_id": "doc", "page_number": 25, "excerpt": "Invented page."},
+            {"document_id": "doc", "page_number": 3, "excerpt": "Invented excerpt."},
+        ]}, [source])
+        self.assertEqual([(item["page_number"], item["excerpt"]) for item in result["suggested_readings"]],
+                         [(3, "Grounded course passage.")])

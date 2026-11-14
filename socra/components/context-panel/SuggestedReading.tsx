@@ -1,20 +1,15 @@
 "use client"
 
 import { BookOpen } from "lucide-react"
-
-interface Reading {
-  documentName: string
-  pageNumber: number
-  section: string
-  chapter?: string
-}
+import type { ContextPanelReading } from "@/lib/socra-ws"
 
 interface SuggestedReadingProps {
-  readings: Reading[]
+  readings: ContextPanelReading[]
+  onOpenPage?: (id: string, page: number, name: string) => void
   isLoading?: boolean
 }
 
-export function SuggestedReading({ readings, isLoading }: SuggestedReadingProps) {
+export function SuggestedReading({ readings, isLoading, onOpenPage }: SuggestedReadingProps) {
   return (
     <div className="min-w-0 overflow-hidden">
       <h3 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-3">
@@ -57,8 +52,12 @@ export function SuggestedReading({ readings, isLoading }: SuggestedReadingProps)
                     )}
                   </div>
                   <p className="mt-0.5 max-w-full truncate text-xs text-muted-foreground" title={reading.documentName}>
-                    {reading.documentName}
-                    {reading.pageNumber ? ` \u00B7 Page ${reading.pageNumber}` : ""}
+                    {reading.documentId && reading.pageNumber > 0 && onOpenPage
+                      ? <button type="button" className="text-secondary hover:underline focus-visible:underline"
+                        onClick={() => onOpenPage(reading.documentId!, reading.pageNumber, reading.documentName)}>
+                        {reading.documentName} · Page {reading.pageNumber}
+                      </button>
+                      : reading.documentName}
                   </p>
                 </div>
               </div>

@@ -46,13 +46,13 @@ export function Hero() {
                   <div className="flex-1 rounded-lg bg-muted/50 p-4">
                     <p className="text-xs text-muted-foreground mb-1 uppercase tracking-wider">@asking/followup</p>
                     <p className="font-serif italic text-sm leading-relaxed">
-                      "You say that Justice is simply returning what is owed. But if a friend lent you a weapon while sane, and asked for it back while in a rage—would it be just to return it?"
+                      &quot;You say that Justice is simply returning what is owed. But if a friend lent you a weapon while sane, and asked for it back while in a rage—would it be just to return it?&quot;
                     </p>
                   </div>
                 </div>
               </div>
               <div className="mt-6 flex items-center justify-between text-xs text-muted-foreground">
-                <span>PLATO'S REPUBLIC</span>
+                <span>PLATO&apos;S REPUBLIC</span>
                 <span className="flex items-center gap-1">
                   <span className="h-1.5 w-1.5 rounded-full bg-secondary animate-pulse" />
                   IN PROGRESS

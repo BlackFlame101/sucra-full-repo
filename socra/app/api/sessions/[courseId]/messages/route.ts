@@ -15,6 +15,11 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
+  const { data: session } = await supabase.from("sessions")
+    .select("id, courses!inner(user_id)")
+    .eq("id", sessionId).eq("courses.user_id", user.id).maybeSingle()
+  if (!session) return NextResponse.json({ error: "Inquiry not found" }, { status: 404 })
+
   const { data: messages, error } = await supabase
     .from("messages")
     .select("*")

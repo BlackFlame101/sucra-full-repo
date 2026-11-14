@@ -24,11 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 async def diagnostiqueur_node(state: SocraState) -> SocraState:
-    return await run_diagnostiqueur(state)
+    result = await run_diagnostiqueur(state)
+    if state.get("emit_diagnostic") and result.get("diagnostic"):
+        await state["emit_diagnostic"](result["diagnostic"])
+    return result
 
 
 async def tuteur_socratique_node(state: SocraState) -> SocraState:
-    return await run_tuteur(state)
+    result = await run_tuteur(state)
+    if state.get("complete_socratic"):
+        await state["complete_socratic"](result["tutor_signal"]["response_text"])
+    return result
 
 
 async def evaluateur_node(state: SocraState) -> SocraState:

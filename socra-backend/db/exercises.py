@@ -47,7 +47,14 @@ def create_exercise(
         "user_id": user_id,
         **payload,
     }
-    result = get_supabase().table("exercises").insert(row).execute()
+    query = get_supabase().table("exercises")
+    request = row.get("chat_request_id")
+    if request:
+        result = query.upsert(row, on_conflict="session_id,chat_request_id", ignore_duplicates=True).execute()
+        if not result.data:
+            result = query.select("*").eq("session_id", row["session_id"]).eq("chat_request_id", request).execute()
+    else:
+        result = query.insert(row).execute()
     if not result.data:
         raise RuntimeError("Supabase did not return the created exercise")
     return result.data[0]

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { createClient } from "@/lib/supabase/server"
+import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { proxyExamRequest } from "@/lib/server/exam-proxy"
 import type { Json } from "@/types"
 
@@ -95,11 +95,15 @@ export async function POST(
       const payload = await examResponse.json().catch(() => null)
       return NextResponse.json({ error: payload?.detail || "Could not retrieve the exam to save it." }, { status: examResponse.status })
     }
-    exam = await examResponse.json()
+    const payload = await examResponse.json()
+    if (payload.status !== "in_progress" && payload.status !== "completed") {
+      return NextResponse.json({ error: "Wait until the current exam job finishes before saving a snapshot." }, { status: 409 })
+    }
+    exam = payload
   }
 
   const title = (session.title?.trim() || (kind === "exam" ? "Mixed Course Exam" : "Saved inquiry")).slice(0, 240)
-  const { data: item, error } = await supabase.from("library_items").insert({
+  const { data: item, error } = await (await createServiceClient()).from("library_items").insert({
     user_id: user.id,
     course_id: course.id,
     item_type: kind,

@@ -16,7 +16,7 @@
  * If the session already has messages, we redirect straight to /inquiry.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -33,7 +33,8 @@ import {
   TriangleAlert,
 } from "lucide-react"
 import { toast } from "sonner"
-import { createClient } from "@/lib/supabase/client"
+import { useSocraChat } from "@/hooks/useSocraChat"
+import { TutorMessage } from "@/components/chat/TutorMessage"
 
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings/SettingsDialog"
@@ -41,8 +42,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
-  buildChatWsUrl,
-  parseServerMessage,
   type DiagnosticReport,
 } from "@/lib/socra-ws"
 import { useUserSettings } from "@/hooks/useUserSettings"
@@ -95,14 +94,29 @@ export default function DiagnosticPage() {
   const [language, setLanguage] = useState<"fr" | "en">("fr")
   const [phase, setPhase] = useState<Phase>("picking")
   const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null)
-  const [tutorOpening, setTutorOpening] = useState("")
-  const [progressMessage, setProgressMessage] = useState("Preparing your request…")
   const [modeResultReady, setModeResultReady] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const wsRef = useRef<WebSocket | null>(null)
   const { getActiveConfig } = useUserSettings()
+  const { messages, status, progress, sendMessage, regenerate, stop, interrupted } = useSocraChat({
+    sessionId, courseId, language, llmConfig: getActiveConfig(), recoverInterrupted: true,
+    onDiagnostic: (report) => { setDiagnostic(report); setPhase("diagnosed") },
+    onExercise: () => setModeResultReady(true),
+    onExplanation: () => setModeResultReady(true),
+    onError: (failure) => {
+      const code = (failure as Error & { code?: string }).code
+      setApiKeyIssue(code?.startsWith("API_") ? { code, message: failure.message } : null)
+      setErrorMessage(failure.message)
+      setPhase("error")
+    },
+  })
+  const assistant = messages.findLast((message) => message.role === "assistant")
+  const part = assistant?.parts[0]
+  const tutorOpening = part?.type === "text" ? part.text : ""
+  const partial = Boolean((assistant?.metadata as { partial?: boolean } | undefined)?.partial)
+  const viewPhase = (phase === "thinking" || phase === "diagnosed") && status === "ready" &&
+    (modeResultReady || Boolean(tutorOpening && !partial)) ? "ready" : phase
 
   // ----------------------------------------------------------------
   // Load course + documents (for nicer suggested topics) + bail out if
@@ -136,9 +150,9 @@ export default function DiagnosticPage() {
 
         if (msgsRes.ok) {
           const msgs = await msgsRes.json()
-          if (Array.isArray(msgs) && msgs.length > 0) {
+          if (Array.isArray(msgs) && msgs.some((message) => message.role === "assistant")) {
             // Already has history — skip diagnostic.
-            router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}`)
+            router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}`)
           }
         }
       } catch {
@@ -150,16 +164,7 @@ export default function DiagnosticPage() {
     return () => {
       cancelled = true
     }
-  }, [courseId, sessionId, router, learningMode])
-
-  // Tear down the socket on unmount or before navigation away.
-  useEffect(() => {
-    return () => {
-      const ws = wsRef.current
-      if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000, "diagnostic unmount")
-      wsRef.current = null
-    }
-  }, [])
+  }, [courseId, sessionId, router])
 
   // Suggested topic prompts derived from the uploaded documents.
   const suggestions = useMemo(() => {
@@ -184,124 +189,20 @@ export default function DiagnosticPage() {
   // ----------------------------------------------------------------
   // Begin diagnostic — open WS, send the topic, capture diagnostic + opening.
   // ----------------------------------------------------------------
-  const beginDiagnostic = async (text: string) => {
+  const beginDiagnostic = (text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
+    setTopic(trimmed)
     setErrorMessage(null)
     setDiagnostic(null)
-    setTutorOpening("")
+    setModeResultReady(false)
     setPhase("thinking")
-    setProgressMessage(learningMode === "explain" ? "Reviewing your course material…" : learningMode === "exercise" ? "Finding relevant course material…" : "Reviewing the course material…")
-
-    const languageResponse = await fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
+    sendMessage({ text: trimmed, mode: learningMode })
+    void fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ language }),
-    }).catch(() => null)
-    if (!languageResponse?.ok) {
-      setErrorMessage("Could not save your language preference. Please try again.")
-      setPhase("error")
-      return
-    }
-
-    let ws: WebSocket
-    try {
-      ws = new WebSocket(buildChatWsUrl(sessionId))
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to reach the tutor backend"
-      setErrorMessage(msg)
-      setPhase("error")
-      return
-    }
-    wsRef.current = ws
-
-    ws.addEventListener("open", () => {
-      void (async () => {
-        try {
-          const cfg = getActiveConfig()
-          const forwardKey = cfg.provider === "google" || cfg.provider === "groq" ? cfg : undefined
-          let accessToken: string | undefined
-          if (learningMode === "exercise" || learningMode === "explain") {
-            const { data, error } = await createClient().auth.getSession()
-            if (error || !data.session?.access_token) {
-              throw new Error("Sign in again before requesting course-based practice or explanations.")
-            }
-            accessToken = data.session.access_token
-          }
-          if (ws.readyState !== WebSocket.OPEN) return
-          ws.send(JSON.stringify({
-            message: trimmed,
-            courseId,
-            sessionId,
-            mode: learningMode,
-            language,
-            ...(accessToken ? { accessToken } : {}),
-            ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
-            ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
-            ...(forwardKey?.model ? { model: forwardKey.model } : {}),
-          }))
-        } catch (err) {
-          setErrorMessage(err instanceof Error ? err.message : "Could not start this learning mode.")
-          setPhase("error")
-          ws.close()
-        }
-      })()
-    })
-
-    ws.addEventListener("error", () => {
-      setErrorMessage(
-        "Could not reach the tutor backend. Make sure the Python server is running on " +
-          (process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000")
-      )
-      setPhase("error")
-    })
-
-    ws.addEventListener("message", (ev) => {
-      const parsed = parseServerMessage(typeof ev.data === "string" ? ev.data : "")
-      if (!parsed) return
-
-      switch (parsed.type) {
-        case "diagnostic":
-          setDiagnostic(parsed.content)
-          setPhase("diagnosed")
-          break
-        case "exercise":
-        case "explanation":
-          setModeResultReady(true)
-          break
-        case "token":
-          setTutorOpening((prev) => prev + parsed.content)
-          break
-        case "context":
-          // Not expected on the first turn, ignore.
-          break
-        case "progress":
-          setProgressMessage(parsed.content.stage)
-          break
-        case "done":
-          setPhase("ready")
-          // Eagerly close — we'll get a fresh socket on the inquiry page.
-          ws.close(1000, "diagnostic done")
-          break
-        case "error":
-          if (typeof parsed.content === "string") {
-            setErrorMessage(parsed.content || "Something went wrong")
-          } else {
-            setApiKeyIssue(parsed.content.code.startsWith("API_")
-              ? { code: parsed.content.code, message: parsed.content.message || "Check the AI API key in Settings." }
-              : null)
-            setErrorMessage(parsed.content.message || "Something went wrong")
-          }
-          setPhase("error")
-          break
-      }
-    })
-
-    ws.addEventListener("close", () => {
-      // If we never reached `ready` and have no error, treat as failure.
-      setPhase((prev) => (prev === "thinking" || prev === "diagnosed" ? "error" : prev))
-      setErrorMessage((prev) => prev ?? null)
-    })
+    }).catch(() => {})
   }
 
   const handleContinue = () => {
@@ -309,13 +210,9 @@ export default function DiagnosticPage() {
   }
 
   const handleStartOver = () => {
-    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
-      wsRef.current.close(1000, "start over")
-    }
-    wsRef.current = null
+    stop()
     setPhase("picking")
     setDiagnostic(null)
-    setTutorOpening("")
     setModeResultReady(false)
     setErrorMessage(null)
     setApiKeyIssue(null)
@@ -356,8 +253,8 @@ export default function DiagnosticPage() {
         </p>
       </div>
 
-      {/* Picking phase */}
-      {phase === "picking" && (
+      {/* Picking viewPhase */}
+      {viewPhase === "picking" && (
         <div className="space-y-5">
           <div className="max-w-xs space-y-2">
             <label className="text-sm font-medium" htmlFor="inquiry-language">Response language</label>
@@ -401,6 +298,16 @@ export default function DiagnosticPage() {
               {learningMode === "socratic" && " Practice and Explain answer directly without the diagnostic."}
             </p>
           </div>
+          {interrupted && (
+            <Button variant="outline" size="sm" onClick={() => {
+              setTopic(interrupted.text)
+              setLearningMode(interrupted.mode)
+              setPhase("thinking")
+              regenerate()
+            }}>
+              Recover last request
+            </Button>
+          )}
           <PickingPanel
             topic={topic}
             onTopicChange={setTopic}
@@ -416,35 +323,38 @@ export default function DiagnosticPage() {
       )}
 
       {/* Thinking / diagnosed / ready phases */}
-      {phase !== "picking" && phase !== "error" && (
+      {viewPhase !== "picking" && viewPhase !== "error" && !(partial && status === "ready") && (
         <div className="space-y-6">
           <PromptEcho text={topic} />
 
           {learningMode === "socratic" ? (
             <>
-              <DiagnosticCard diagnostic={diagnostic} loading={phase === "thinking"} />
-              <TutorOpeningCard text={tutorOpening} visible={phase === "diagnosed" || phase === "ready"} streaming={phase === "diagnosed"} />
+              <DiagnosticCard diagnostic={diagnostic} loading={viewPhase === "thinking" && !tutorOpening} />
+              <TutorOpeningCard text={tutorOpening} visible={Boolean(tutorOpening)} streaming={status === "streaming"} />
             </>
           ) : (
-            <div role={phase === "thinking" ? "status" : undefined} aria-live={phase === "thinking" ? "polite" : undefined} className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
-              {phase === "thinking"
-                ? <span className="flex items-center gap-3"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-secondary" />{progressMessage}</span>
+            <div role={viewPhase === "thinking" ? "status" : undefined} aria-live={viewPhase === "thinking" ? "polite" : undefined} className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
+              {viewPhase === "thinking"
+                ? <span className="flex items-center gap-3"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-secondary" />{progress || "Preparing your request."}</span>
                 : modeResultReady
                   ? learningMode === "explain" ? "Your explanation is ready. Continue to view it with its course citations." : "Your practice question is ready. Continue to view it."
                   : "Your selected learning mode is processing your request."}
             </div>
           )}
 
+          {learningMode === "explain" && tutorOpening && !modeResultReady && (
+            <TutorMessage content={tutorOpening} isStreaming={status === "streaming"} partial={partial} />
+          )}
           <div className="flex items-center justify-between gap-3 pt-2">
-            <Button variant="ghost" size="sm" onClick={handleStartOver}>
-              Start over
+            <Button variant="ghost" size="sm" onClick={viewPhase === "ready" ? handleStartOver : stop}>
+              {viewPhase === "ready" ? "Start over" : "Stop"}
             </Button>
             <Button
               className="gap-2"
-              disabled={phase !== "ready"}
+              disabled={viewPhase !== "ready"}
               onClick={handleContinue}
             >
-              {phase === "ready" ? learningMode === "socratic" ? "Continue Inquiry" : learningMode === "explain" ? "View Explanation" : "View Practice" : "Preparing your response..."}
+              {viewPhase === "ready" ? learningMode === "socratic" ? "Continue Inquiry" : learningMode === "explain" ? "View Explanation" : "View Practice" : "Preparing your response..."}
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
@@ -452,7 +362,7 @@ export default function DiagnosticPage() {
       )}
 
       {/* Error state */}
-      {phase === "error" && (
+      {(viewPhase === "error" || (partial && status === "ready" && viewPhase !== "picking")) && (
         <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-6 space-y-4">
           <div className="flex items-start gap-3">
             <div className="h-9 w-9 shrink-0 rounded-md bg-destructive/10 flex items-center justify-center">
@@ -473,12 +383,12 @@ export default function DiagnosticPage() {
                   <Button size="sm" onClick={() => setSettingsOpen(true)}><Settings className="mr-2 h-4 w-4" />Open Settings</Button>
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground">{errorMessage || "An unknown error occurred."}</p>
+                <p className="text-sm text-muted-foreground">{errorMessage || "Generation stopped. Retry to continue."}</p>
               )}
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={handleStartOver}>
+            <Button variant="outline" size="sm" onClick={() => { setPhase("thinking"); regenerate() }}>
               Try again
             </Button>
             <Button

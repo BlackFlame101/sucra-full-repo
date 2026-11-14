@@ -36,6 +36,8 @@ export interface EvaluationResult {
 }
 
 export type LearningMode = "socratic" | "exercise" | "explain"
+export type NotebookAction = "ask" | "related" | "improve" | "expand" | "simplify" | "example" | "summarize" | "correct" | "flashcards" | "quiz"
+export type NotebookContext = { id: string; action: NotebookAction; selection?: string }
 
 export interface PublicExplanation {
   definition: string
@@ -95,9 +97,20 @@ export interface PublicSolution {
   common_mistakes: string[]
 }
 
+export type PublicCard =
+  | { kind: "exercise"; card: PublicExercise }
+  | { kind: "correction"; card: PublicCorrection }
+  | { kind: "solution"; card: PublicSolution }
+  | { kind: "explanation"; card: PublicExplanation }
+
 export type WSServerMessage =
   | { type: "diagnostic"; content: DiagnosticReport }
   | { type: "token"; content: string }
+  | { type: "content_delta"; content: { text: string | null; preview?: boolean } }
+  | { type: "card_ready"; content: PublicCard }
+  | { type: "context_update"; content: EvaluationResult }
+  | { type: "connected" | "request_accepted" | "turn_finalized" | "cancelled" }
+  | { type: "response_complete"; content: { message_id?: string; text: string } }
   | { type: "context"; content: EvaluationResult }
   | { type: "exercise"; content: PublicExercise }
   | { type: "correction"; content: PublicCorrection }
@@ -112,6 +125,8 @@ export type WSServerMessage =
 // ---------------------------------------------------------------------------
 
 export interface WSClientMessage {
+  requestId?: string
+  version?: 2
   message?: string
   courseId: string
   sessionId: string
@@ -121,10 +136,11 @@ export interface WSClientMessage {
   model?: string
   mode?: LearningMode
   accessToken?: string
-  action?: "message" | "submit_attempt" | "reveal_solution"
+  action?: "authenticate" | "message" | "submit_attempt" | "reveal_solution" | "restore_exercise" | "cancel"
   exerciseId?: string
   answer?: string
   hintsUsed?: number
+  notebook?: NotebookContext
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +163,7 @@ export function buildChatWsUrl(sessionId: string): string {
 // ---------------------------------------------------------------------------
 
 export interface ContextPanelReading {
+  documentId?: string
   documentName: string
   pageNumber: number
   section: string
@@ -165,6 +182,7 @@ export function adaptSuggestedReading(
   const section =
     excerpt.length > 80 ? excerpt.slice(0, 80).trimEnd() + "…" : excerpt || "Relevant excerpt"
   return {
+    documentId: item.document_id ?? undefined,
     documentName: item.filename || "Course material",
     pageNumber: item.page_number ?? 0,
     section,
@@ -182,10 +200,14 @@ export function adaptSuggestedReadings(
 // Safe JSON parse
 // ---------------------------------------------------------------------------
 
-export function parseServerMessage(raw: string): WSServerMessage | null {
+export function parseServerMessage(raw: string): (WSServerMessage & { request_id?: string; session_id?: string; sequence?: number; version?: number }) | null {
   try {
     const obj = JSON.parse(raw) as Partial<WSServerMessage> & { type?: string }
     if (!obj || typeof obj !== "object" || typeof obj.type !== "string") return null
+    if (obj.type === "token" && (!("content" in obj) || typeof obj.content !== "string")) return null
+    if (obj.type === "content_delta" && (!obj.content || (obj.content.text !== null && typeof obj.content.text !== "string"))) return null
+    if (obj.type === "card_ready" && (!obj.content?.card || !["exercise", "explanation", "correction", "solution"].includes(obj.content.kind))) return null
+    if (obj.type === "response_complete" && (!("content" in obj) || typeof obj.content?.text !== "string")) return null
     return obj as WSServerMessage
   } catch {
     return null

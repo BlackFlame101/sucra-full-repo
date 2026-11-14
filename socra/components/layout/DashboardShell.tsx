@@ -1,5 +1,6 @@
 "use client"
 
+import { usePathname } from "next/navigation"
 import { DashboardNavbar } from "@/components/layout/DashboardNavbar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 
@@ -13,10 +14,17 @@ interface DashboardShellProps {
 }
 
 export function DashboardShell({ user, children }: DashboardShellProps) {
+  const pathname = usePathname()
+  const isInquiry = /^\/dashboard\/course\/[^/]+\/inquiry\/[^/]+\/?$/.test(pathname)
+  const isWorkspace = isInquiry || /^\/dashboard\/notebook\/?$/.test(pathname)
+
   return (
-    <div className="min-h-screen bg-background">
+    <div
+      data-dashboard-workspace={isWorkspace ? "" : undefined}
+      className={isWorkspace ? "flex h-dvh flex-col overflow-hidden bg-background" : "min-h-screen bg-background"}
+    >
       <DashboardNavbar user={user} />
-      <main>
+      <main className={isWorkspace ? "min-h-0 flex-1 overflow-hidden" : undefined}>
         <ErrorBoundary>{children}</ErrorBoundary>
       </main>
     </div>

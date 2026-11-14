@@ -2,23 +2,71 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from api.routes.exams import (
     DEFAULT_QUESTION_TYPES,
-    QUESTION_TYPES,
     _has_answer_for_every_question,
     _public_exam,
     _require_complete_answers,
     _schedule_question_types,
     _candidate_scopes,
-    _fallback_question_types,
     _scope_for_exam_question,
+    router,
 )
 
 
 class MixedExamTests(unittest.TestCase):
+    def test_validation_response_never_echoes_a_provider_key(self) -> None:
+        app = FastAPI()
+        app.include_router(router)
+        with TestClient(app) as client:
+            response = client.post("/exams/start", json={"api_key": "private-example", "question_count": 1})
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {"detail": "Check the exam settings and try again."})
+        self.assertNotIn("private-example", response.text)
+
+    def test_start_returns_queued_progress_for_authenticated_owner(self) -> None:
+        app = FastAPI()
+        app.include_router(router)
+        course_id, session_id, exam_id = (str(uuid4()) for _ in range(3))
+        queued = {"id": exam_id, "status": "preparing", "question_count": 3}
+        queue = AsyncMock(return_value=exam_id)
+        with TestClient(app) as client, patch("api.routes.exams._user_id_from_header", return_value="owner"), \
+             patch("api.routes.exams.rpc", queue), patch("api.routes.exams.get_exam_for_session", return_value=None), \
+             patch("api.routes.exams.consume_study_quota", AsyncMock(return_value=True)), patch("api.routes.exams.get_exam_for_owner", return_value=queued), \
+             patch("api.routes.exams.count_exam_slots", return_value=1):
+            response = client.post("/exams/start", json={
+                "course_id": course_id, "session_id": session_id, "question_count": 3,
+            }, headers={"Authorization": "Bearer fixture"})
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["progress"], {"completed": 1, "total": 3})
+        self.assertEqual(response.json()["questions"], [])
+        function, params = queue.await_args.args
+        self.assertEqual(function, "queue_exam")
+        self.assertEqual((params["owner"], params["course"], params["inquiry"]), ("owner", course_id, session_id))
+        self.assertNotIn("api_key", params["plan"])
+
+    def test_submission_replay_returns_progress_and_does_not_queue_again(self) -> None:
+        app = FastAPI()
+        app.include_router(router)
+        exam_id = str(uuid4())
+        grading = {"id": exam_id, "status": "grading", "question_count": 3,
+                   "results": [{"feedback": "hidden until complete"}]}
+        queue = AsyncMock()
+        with TestClient(app) as client, patch("api.routes.exams._user_id_from_header", return_value="owner"), \
+             patch("api.routes.exams.get_exam_for_owner", return_value=grading) as read, patch("api.routes.exams.rpc", queue):
+            response = client.post(f"/exams/{exam_id}/submit", json={}, headers={"Authorization": "Bearer fixture"})
+        read.assert_called_once_with(exam_id=exam_id, user_id="owner")
+        queue.assert_not_awaited()
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["progress"], {"completed": 1, "total": 3})
+        self.assertEqual(response.json()["results"], [])
+
     def test_question_schedules_are_balanced_and_include_each_type(self) -> None:
         for count in range(3, 13):
             with self.subTest(question_count=count):
@@ -56,17 +104,6 @@ class MixedExamTests(unittest.TestCase):
         self.assertEqual(_scope_for_exam_question("internships", sections, 2, "short_answer"), "internships")
         self.assertEqual(len(_candidate_scopes("", sections, 1, "short_answer")), 2)
         self.assertEqual(_candidate_scopes("internships", sections, 1, "short_answer"), ["internships"])
-
-    def test_unavailable_format_falls_back_to_least_used_verified_types(self) -> None:
-        generated = [
-            {"exercise_type": "short_answer"},
-            {"exercise_type": "multiple_choice"},
-            {"exercise_type": "multiple_choice"},
-        ]
-        fallbacks = _fallback_question_types("numerical", generated)
-        self.assertEqual(fallbacks[0], "short_answer")
-        self.assertNotIn("numerical", fallbacks)
-        self.assertTrue(set(_fallback_question_types("sql", generated, ["sql", "code", "short_answer"])).issubset({"code", "short_answer"}))
 
     def test_incomplete_exam_submission_is_rejected(self) -> None:
         exercises = [{"id": "q1"}, {"id": "q2"}, {"id": "q3"}]

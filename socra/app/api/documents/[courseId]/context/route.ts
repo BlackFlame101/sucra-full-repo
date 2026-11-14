@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
-import { createClient as createSupabaseClient } from "@supabase/supabase-js"
-import { createClient } from "@/lib/supabase/server"
+import { createClient, createServiceClient } from "@/lib/supabase/server"
+import { isPdfProcessing } from "@/lib/documents"
 
 export async function GET(
   _request: Request,
@@ -16,28 +16,23 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { data: course } = await supabase
+  const { data: course, error } = await supabase
     .from("courses")
-    .select("id")
+    .select("documents(id, filename, content_hash, summary_status, index_status, index_stage, summary_stage, processing_error)")
     .eq("id", courseId)
     .eq("user_id", user.id)
-    .single()
+    .order("created_at", { referencedTable: "documents", ascending: false })
+    .maybeSingle()
 
+  if (error) {
+    return NextResponse.json({ error: error.message }, { status: 500 })
+  }
   if (!course) {
     return NextResponse.json({ error: "Course not found" }, { status: 404 })
   }
 
-  const { data: documents, error: documentsError } = await supabase
-    .from("documents")
-    .select("id, filename, content_hash, summary_status")
-    .eq("course_id", courseId)
-    .order("created_at", { ascending: false })
-
-  if (documentsError) {
-    return NextResponse.json({ error: documentsError.message }, { status: 500 })
-  }
-
-  if (!documents?.length) return NextResponse.json([])
+  const { documents } = course
+  if (!documents.length) return NextResponse.json([])
 
   // The summary table is private to the backend. RLS intentionally denies
   // browser clients, so use a server-only client after checking course owner.
@@ -53,11 +48,7 @@ export async function GET(
   }> | null = null
   let summariesError: unknown = null
   try {
-    const serviceClient = createSupabaseClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      { auth: { autoRefreshToken: false, persistSession: false } }
-    )
+    const serviceClient = await createServiceClient()
     const result = await serviceClient
       .from("document_summaries")
       .select("document_id, document_version, level, section_index, title, summary, page_start, page_end")
@@ -75,6 +66,7 @@ export async function GET(
     ? []
     : (summaries ?? []).filter((summary) =>
         documents.some((document) =>
+          document.index_status === "ready" &&
           document.id === summary.document_id &&
           document.content_hash === summary.document_version
         )
@@ -85,6 +77,9 @@ export async function GET(
       documentId: document.id,
       filename: document.filename,
       status: document.summary_status,
+      indexStatus: document.index_status,
+      ocrRequired: /^(Scanned PDF[.]|OCR)/.test(document.processing_error ?? ""),
+      processing: isPdfProcessing(document),
       summary: currentSummaries.find(
         (summary) => summary.document_id === document.id && summary.level === "document"
       ) ?? null,

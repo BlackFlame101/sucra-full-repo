@@ -53,6 +53,11 @@ export type Database = {
           title: string
           topic: string
           content: string
+          content_json: Json | null
+          tags: string[]
+          starred: boolean
+          version: number
+          review_due: string | null
           source_type: "manual" | "explanation" | "exercise"
           source_data: Json
           source_document_id: string | null
@@ -67,6 +72,11 @@ export type Database = {
           title: string
           topic?: string
           content?: string
+          content_json?: Json | null
+          tags?: string[]
+          starred?: boolean
+          version?: number
+          review_due?: string | null
           source_type?: "manual" | "explanation" | "exercise"
           source_data?: Json
           source_document_id?: string | null
@@ -81,6 +91,11 @@ export type Database = {
           title?: string
           topic?: string
           content?: string
+          content_json?: Json | null
+          tags?: string[]
+          starred?: boolean
+          version?: number
+          review_due?: string | null
           source_type?: "manual" | "explanation" | "exercise"
           source_data?: Json
           source_document_id?: string | null
@@ -90,12 +105,38 @@ export type Database = {
         }
         Relationships: []
       }
+      notebook_flashcards: {
+        Row: { note_id: string; note_version: number; cards: Json }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      notebook_sources: {
+        Row: { id: string; user_id: string; note_id: string; course_id: string | null; session_id: string | null;
+          message_id: string | null; kind: "explanation" | "exercise" | "tutor"; citations: Json; fingerprint: string; created_at: string }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      exercise_attempts: {
+        Row: { id: string; exercise_id: string; session_id: string; user_id: string; solution_revealed: boolean }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
+      exercises: {
+        Row: { id: string; session_id: string; course_id: string; expected_answer: string; common_mistakes: string[]; exercise_data: Json; exercise_type: string }
+        Insert: never
+        Update: never
+        Relationships: []
+      }
       courses: {
         Row: {
           created_at: string
           description: string | null
           id: string
           name: string
+          notebook_private: boolean
           updated_at: string
           user_id: string
         }
@@ -128,6 +169,12 @@ export type Database = {
           page_count: number | null
           storage_path: string
           summary_status: string
+          index_status: string
+          index_generation: number
+          index_stage: string | null
+          summary_stage: string | null
+          processing_error: string | null
+          summary_error: string | null
         }
         Insert: {
           course_id: string
@@ -139,6 +186,12 @@ export type Database = {
           page_count?: number | null
           storage_path: string
           summary_status?: string
+          index_status?: string
+          index_generation?: number
+          index_stage?: string | null
+          summary_stage?: string | null
+          processing_error?: string | null
+          summary_error?: string | null
         }
         Update: {
           course_id?: string
@@ -150,6 +203,12 @@ export type Database = {
           page_count?: number | null
           storage_path?: string
           summary_status?: string
+          index_status?: string
+          index_generation?: number
+          index_stage?: string | null
+          summary_stage?: string | null
+          processing_error?: string | null
+          summary_error?: string | null
         }
         Relationships: [
           {
@@ -348,6 +407,35 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      open_notebook_thread: { Args: { owner: string; note: string }; Returns: Json }
+      capture_notebook_response: {
+        Args: { owner: string; request: string; destination: string | null; source_course: string;
+          source_session: string; source_message: string; source_kind: string; source_citations: Json;
+          fingerprint_arg: string; note_title: string; body_nodes: Json; body_text: string; legacy_nodes: Json }
+        Returns: Json
+      }
+      reserve_pdf_upload: {
+        Args: { owner: string; course: string; upload_id: string; filename_arg: string; size_arg: number; digest_arg: string }
+        Returns: { state: string; path?: string }
+      }
+      finish_pdf_upload: {
+        Args: { owner: string; upload_id: string; credential?: string }
+        Returns: { state: string; document?: Database["public"]["Tables"]["documents"]["Row"] }
+      }
+      cancel_pdf_upload: { Args: { owner: string; upload_id: string }; Returns: boolean }
+      consume_study_quota: { Args: { owner: string; operation_name: string }; Returns: boolean }
+      retry_pdf_with_quota: {
+        Args: { owner: string; document: string; job_kind: string; credential?: string }
+        Returns: { state: string; document?: Database["public"]["Tables"]["documents"]["Row"] }
+      }
+      queue_pdf_upload: {
+        Args: { owner_id: string; course: string; document: string; filename_arg: string; path: string; size_bytes: number; digest: string; credential?: string }
+        Returns: Database["public"]["Tables"]["documents"]["Row"]
+      }
+      queue_pdf_retry: {
+        Args: { owner_id: string; document: string; job_kind: string; credential?: string }
+        Returns: Database["public"]["Tables"]["documents"]["Row"] | null
+      }
       match_embeddings: {
         Args: {
           query_embedding: string

@@ -4,23 +4,26 @@ import { NextResponse } from "next/server"
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
   const code = searchParams.get("code")
-  const next = searchParams.get("next") ?? "/dashboard"
+  const recovery = searchParams.get("next") === "/reset-password"
 
   if (code) {
-    const supabase = await createClient()
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
-    if (!error) {
-      const forwardedHost = request.headers.get("x-forwarded-host")
-      const isLocalEnv = process.env.NODE_ENV === "development"
-      if (isLocalEnv) {
-        return NextResponse.redirect(`${origin}${next}`)
-      } else if (forwardedHost) {
-        return NextResponse.redirect(`https://${forwardedHost}${next}`)
-      } else {
-        return NextResponse.redirect(`${origin}${next}`)
+    const client = await createClient()
+    const { error, data } = await client.auth.exchangeCodeForSession(code)
+    if (!error && data.session) {
+      if (!recovery) return NextResponse.redirect(new URL("/dashboard", origin))
+      if ("redirectType" in data && data.redirectType === "recovery") {
+        const { data: claimsData } = await client.auth.getClaims(data.session.access_token)
+        const sessionId = claimsData?.claims?.session_id
+        if (typeof sessionId === "string") {
+          const response = NextResponse.redirect(new URL("/reset-password", origin))
+          response.cookies.set("socra_recovery", sessionId, {
+            httpOnly: true, secure: new URL(origin).protocol === "https:", sameSite: "lax", path: "/", maxAge: 600,
+          })
+          return response
+        }
       }
     }
   }
 
-  return NextResponse.redirect(`${origin}/login?error=auth_callback_error`)
+  return NextResponse.redirect(new URL(recovery ? "/forgot-password?error=expired" : "/login?error=auth_callback_error", origin))
 }

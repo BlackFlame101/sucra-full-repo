@@ -440,7 +440,7 @@ async def main() -> int:
     )
     parser.add_argument(
         "--model",
-        help="Override the chat model (default: server config, e.g. gemini-2.5-flash-lite).",
+        help="Override the chat model (defaults to server configuration).",
         default="",
     )
     parser.add_argument(
@@ -457,6 +457,10 @@ async def main() -> int:
         default=0.0,
     )
     args = parser.parse_args()
+    from urllib.parse import urlparse
+    from config import get_settings
+    if urlparse(get_settings().supabase_url).hostname not in {"localhost", "127.0.0.1", "::1"}:
+        parser.error("The scenario runner writes to Supabase. Use a disposable loopback database.")
 
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     logging.basicConfig(
@@ -467,7 +471,7 @@ async def main() -> int:
     scenarios = load_scenarios(filter_id=args.scenario)
     print(f"Loaded {len(scenarios)} scenario(s) from {SCENARIOS_DIR}")
     if args.api_key:
-        print(f"Using runtime --api-key override (***{args.api_key[-4:]})")
+        print("Using runtime API key override.")
     if args.model:
         print(f"Using runtime --model override: {args.model}")
     if args.delay > 0:

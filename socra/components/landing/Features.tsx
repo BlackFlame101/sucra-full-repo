@@ -27,7 +27,7 @@ const features = [
     content: (
       <div className="mt-4 space-y-2">
         <p className="text-xs text-secondary">
-          "What assumptions are you making about X?"
+          &quot;What assumptions are you making about X?&quot;
         </p>
         <p className="text-xs text-muted-foreground">
           Consider the implications...

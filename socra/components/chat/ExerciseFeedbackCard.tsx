@@ -1,5 +1,7 @@
 "use client"
 
+import { PdfCitation } from "@/components/documents/PdfCitation"
+
 import { ArrowRight, CheckCircle2, Eye, Lightbulb, Sparkles, Library, NotebookPen } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { PublicCorrection, PublicSolution } from "@/lib/socra-ws"
@@ -67,7 +69,7 @@ export function ExerciseFeedbackCard({
           <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
             {correction.citations.map((citation, index) => (
               <li key={`${citation.document_id}-${citation.page_number}-${index}`}>
-                {citation.filename}, page {citation.page_number}
+                <PdfCitation documentId={citation.document_id} page={citation.page_number} filename={citation.filename} />
               </li>
             ))}
           </ul>
@@ -87,7 +89,7 @@ export function ExerciseFeedbackCard({
             </div>
           )}
           {!readOnly && <p className="text-xs text-muted-foreground">You have revealed the solution for this exercise.</p>}
-          {!readOnly && <div className="flex flex-wrap gap-2 border-t border-primary/10 pt-3"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary?.(correction, solution)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook?.(correction, solution)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>}
+          {!readOnly && <div className="flex flex-wrap gap-2 border-t border-primary/10 pt-3"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary?.(correction, solution)}><Library className="h-4 w-4"/>Save to Library</Button>{onSaveToNotebook && <Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook(correction, solution)}><NotebookPen className="h-4 w-4"/>Save to Notebook</Button>}</div>}
         </div>
       ) : !readOnly ? (
         <Button type="button" variant="outline" className="gap-2" onClick={onRevealSolution} disabled={disabled}>

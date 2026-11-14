@@ -1,8 +1,9 @@
 "use client"
 
 import Link from "next/link"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useState } from "react"
 import { BookOpen, FileText, Search, Bookmark, Trash2, ExternalLink } from "lucide-react"
+import { pdfPageUrl } from "@/components/documents/PdfCitation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 
@@ -39,21 +40,22 @@ export default function LibraryPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
 
-  async function load() {
-    setLoading(true)
-    const response = await fetch("/api/library")
-    const payload = await response.json()
-    if (!response.ok) setError(payload.error || "Could not load your library.")
-    else { setData(payload); setError("") }
-    setLoading(false)
-  }
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch("/api/library", { signal: controller.signal }).then(async (response) => {
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || "Could not load your library.")
+      if (!controller.signal.aborted) setData(payload)
+    }).catch((error) => { if (!controller.signal.aborted) setError(error.message) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [])
 
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const matches = (text: string) => !normalizedQuery || text.toLocaleLowerCase().includes(normalizedQuery)
-  const courses = useMemo(() => data.courses.filter((item) => matches(`${item.name} ${item.description ?? ""}`)), [data.courses, normalizedQuery])
-  const documents = useMemo(() => data.documents.filter((item) => matches(`${item.filename} ${item.course_name}`)), [data.documents, normalizedQuery])
-  const savedItems = useMemo(() => data.saved_items.filter((item) => matches(`${item.title} ${item.course_name} ${item.item_type}`)), [data.saved_items, normalizedQuery])
+  const courses = data.courses.filter((item) => matches(`${item.name} ${item.description ?? ""}`))
+  const documents = data.documents.filter((item) => matches(`${item.filename} ${item.course_name}`))
+  const savedItems = data.saved_items.filter((item) => matches(`${item.title} ${item.course_name} ${item.item_type}`))
 
   async function removeSaved(id: string) {
     const response = await fetch(`/api/library/${id}`, { method: "DELETE" })
@@ -99,11 +101,11 @@ export default function LibraryPage() {
       {showingDocuments && <section>
         <div className="mb-4 flex items-center justify-between"><h2 className="font-serif text-2xl">Documents</h2><span className="text-xs text-muted-foreground">{documents.length}</span></div>
         {documents.length ? <div className="grid gap-3 md:grid-cols-2">{documents.map((document) =>
-          <Link key={document.id} href={`/dashboard/course/${document.course_id}`} className="flex items-center gap-3 rounded-xl border border-border/60 bg-card/50 p-4 transition hover:border-secondary/40">
+          <a key={document.id} href={pdfPageUrl(document.id, 1)} target="_blank" rel="noopener noreferrer" className="flex items-center gap-3 rounded-xl border border-border/60 bg-card/50 p-4 transition hover:border-secondary/40">
             <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-tertiary/10"><FileText className="h-5 w-5 text-tertiary" /></span>
             <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{document.filename}</span><span className="mt-1 block text-xs text-muted-foreground">{document.course_name} · {document.page_count ? `${document.page_count} pages` : "Processing"}</span></span>
             <ExternalLink className="h-4 w-4 shrink-0 text-muted-foreground" />
-          </Link>
+          </a>
         )}</div> : <p className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">No documents match your search.</p>}
       </section>}
 

@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { ArrowRight, BookOpen, Check, Copy, Lightbulb, Library, NotebookPen } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { PdfCitation } from "@/components/documents/PdfCitation"
 import type { PublicExplanation } from "@/lib/socra-ws"
 
 export function ExplanationCard({ explanation, onDiscuss, onSaveToLibrary, onSaveToNotebook, disabled = false, readOnly = false }: {
@@ -58,7 +59,7 @@ export function ExplanationCard({ explanation, onDiscuss, onSaveToLibrary, onSav
         <BookOpen className="h-5 w-5" />
         <h3 className="text-lg font-semibold text-foreground">Course explanation</h3>
       </div>
-      {!readOnly && <div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToLibrary?.(explanation)}><Library className="h-4 w-4"/>Save to Library</Button><Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={() => onSaveToNotebook?.(explanation)}><NotebookPen className="h-4 w-4"/>Add to Notebook</Button></div>}
+        {!readOnly && <div className="flex flex-wrap gap-2"><Button type="button" size="sm" variant="outline" className="gap-1.5" disabled={disabled} onClick={() => onSaveToLibrary?.(explanation)}><Library className="h-4 w-4"/>Save to Library</Button>{onSaveToNotebook && <Button type="button" size="sm" variant="outline" className="gap-1.5" disabled={disabled} onClick={() => onSaveToNotebook(explanation)}><NotebookPen className="h-4 w-4"/>Save to Notebook</Button>}</div>}
       {explanation.definition ? <div className="min-w-0 space-y-2"><h4 className="text-sm font-semibold">Definition</h4><p className="break-words text-sm leading-relaxed text-muted-foreground">{explanation.definition}</p></div> : null}
       {explanation.intuition ? <div className="min-w-0 space-y-2"><h4 className="text-sm font-semibold">Intuition</h4><p className="break-words text-sm leading-relaxed text-muted-foreground">{explanation.intuition}</p></div> : null}
       {explanation.sections?.length ? <div className="min-w-0 space-y-4">{explanation.sections.map((section, index) => {
@@ -83,8 +84,8 @@ export function ExplanationCard({ explanation, onDiscuss, onSaveToLibrary, onSav
       {explanation.course_example ? <div className="space-y-2"><h4 className="text-sm font-semibold">From your course</h4><p className="text-sm leading-relaxed text-muted-foreground">{explanation.course_example}</p></div> : null}
       {explanation.common_pitfalls?.length ? <div className="rounded-xl bg-muted/40 p-4"><h4 className="flex items-center gap-2 text-sm font-semibold"><Lightbulb className="h-4 w-4 text-primary" />Common pitfalls</h4><ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-relaxed text-muted-foreground">{explanation.common_pitfalls.map((item, index) => <li key={index}>{item}</li>)}</ul></div> : null}
       <details className="rounded-xl border border-border/70 px-4 py-3">
-        <summary className="cursor-pointer text-sm font-medium">Course sources ({explanation.citations.length})</summary>
-        <ul className="mt-3 space-y-3 text-sm">{explanation.citations.map((citation, index) => <li key={`${citation.document_id}-${citation.page_number}-${index}`}><p className="font-medium">{citation.filename} · page {citation.page_number ?? "page unavailable"}</p><p className="mt-1 text-muted-foreground">{citation.excerpt ? `“${citation.excerpt}”` : "The source page is cited, but the excerpt is unavailable."}</p></li>)}</ul>
+        <summary className="cursor-pointer text-sm font-medium">Course sources ({explanation.citations?.length ?? 0})</summary>
+        <ul className="mt-3 space-y-3 text-sm">{explanation.citations?.map((citation, index) => <li key={`${citation.document_id}-${citation.page_number}-${index}`}><p className="font-medium"><PdfCitation documentId={citation.document_id} page={citation.page_number} filename={citation.filename} /></p><p className="mt-1 text-muted-foreground">{citation.excerpt ? `“${citation.excerpt}”` : "The source page is cited, but the excerpt is unavailable."}</p></li>)}</ul>
       </details>
       {explanation.check_question ? <div className="rounded-xl border border-primary/15 bg-primary/5 p-4">
         <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Check your understanding</p>

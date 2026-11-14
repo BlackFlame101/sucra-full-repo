@@ -5,5 +5,5 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string }> },
 ) {
   const { sessionId } = await params
-  return proxyExamRequest(`/exams/session/${encodeURIComponent(sessionId)}`, "GET")
+  return proxyExamRequest(`/exams/session/${encodeURIComponent(sessionId)}`, "GET", undefined, 15_000)
 }

@@ -1,11 +1,17 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { PdfCitation } from "@/components/documents/PdfCitation"
+
+import { useState } from "react"
 import { ArrowRight, BookOpen, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import type { PublicExercise } from "@/lib/socra-ws"
 
-export function ExerciseCard({
+export function ExerciseCard(props: Parameters<typeof ExerciseCardForm>[0]) {
+  return <ExerciseCardForm key={props.exercise.id} {...props} />
+}
+
+function ExerciseCardForm({
   exercise,
   onNextExercise,
   onSubmitAttempt,
@@ -24,13 +30,7 @@ export function ExerciseCard({
   const [answer, setAnswer] = useState("")
   const isCodeCompletion = exercise.exercise_type === "code" && exercise.code_task_mode === "completion"
   const codeBlankCount = isCodeCompletion ? exercise.starter_code.match(/____/g)?.length ?? 0 : 0
-  const [completionAnswers, setCompletionAnswers] = useState<string[]>([])
-
-  useEffect(() => {
-    setAnswer("")
-    setRevealedHints(0)
-    setCompletionAnswers(Array.from({ length: codeBlankCount }, () => ""))
-  }, [exercise.id, codeBlankCount])
+  const [completionAnswers, setCompletionAnswers] = useState<string[]>(() => Array.from({ length: codeBlankCount }, () => ""))
 
   const revealNextHint = () => {
     const nextCount = Math.min(revealedHints + 1, exercise.hints.length)
@@ -248,6 +248,7 @@ export function ExerciseCard({
                   {citation.filename} <span className="font-normal text-muted-foreground">· page {citation.page_number}</span>
                 </summary>
                 <p className="mt-2 text-sm leading-relaxed text-muted-foreground">“{citation.excerpt}”</p>
+                <PdfCitation documentId={citation.document_id} page={citation.page_number} filename="Open PDF" />
               </details>
             ))}
           </div>

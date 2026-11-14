@@ -20,6 +20,7 @@ from functools import lru_cache
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
+from agents.notebook import run_notebook
 
 from graph.nodes import (
     diagnostiqueur_node,
@@ -33,7 +34,9 @@ from graph.nodes import (
 from graph.state import SocraState
 
 
-def _route_entry(state: SocraState) -> Literal["diagnostiqueur", "tuteur_socratique", "exercise_generator", "correcteur", "explicateur"]:
+def _route_entry(state: SocraState) -> Literal["diagnostiqueur", "tuteur_socratique", "exercise_generator", "correcteur", "explicateur", "notebook"]:
+    if state.get("notebook_action") and state["notebook_action"] != "quiz":
+        return "notebook"
     if state.get("mode") == "correct":
         return "correcteur"
     if state.get("mode") == "exercise":
@@ -58,6 +61,7 @@ def build_graph():
     g.add_node("exercise_generator", exercise_generator_node)
     g.add_node("correcteur", correcteur_node)
     g.add_node("explicateur", explicateur_node)
+    g.add_node("notebook", run_notebook)
 
     g.add_conditional_edges(
         START,
@@ -68,11 +72,13 @@ def build_graph():
             "exercise_generator": "exercise_generator",
             "correcteur": "correcteur",
             "explicateur": "explicateur",
+            "notebook": "notebook",
         },
     )
 
     g.add_edge("exercise_generator", END)
     g.add_edge("explicateur", END)
+    g.add_edge("notebook", END)
     g.add_edge("correcteur", "memoire")
 
     g.add_edge("diagnostiqueur", "tuteur_socratique")

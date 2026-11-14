@@ -1,4 +1,5 @@
-import { createClient } from "@/lib/supabase/server"
+import { createClient, createServiceClient } from "@/lib/supabase/server"
+import { readSavedExplanation } from "@/lib/server/saved-explanation"
 import { NextResponse } from "next/server"
 
 export async function GET() {
@@ -43,29 +44,37 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   const body = await request.json().catch(() => null)
-  if (!body || !["explanation", "exercise", "inquiry", "exam"].includes(body.item_type) ||
-      typeof body.course_id !== "string" || typeof body.title !== "string" ||
-      !body.title.trim() || !body.content || typeof body.content !== "object") {
+  if (!body || !["explanation", "exercise"].includes(body.item_type) ||
+      typeof body.course_id !== "string" || typeof body.title !== "string" || body.title.length > 240 ||
+      !body.title.trim() || !body.content || typeof body.content !== "object" || JSON.stringify(body.content).length > 250_000) {
     return NextResponse.json({ error: "A course, title, item type, and saved content are required." }, { status: 400 })
   }
   const { data: course } = await supabase.from("courses").select("id")
     .eq("id", body.course_id).eq("user_id", user.id).single()
   if (!course) return NextResponse.json({ error: "Course not found." }, { status: 404 })
-  const sourceDocumentId = typeof body.source_document_id === "string" ? body.source_document_id : null
+  if (body.item_type === "explanation") {
+    const explanation = await readSavedExplanation(supabase, user.id, course.id, body.content)
+    if (!explanation) return NextResponse.json({ error: "A completed explanation from this inquiry is required." }, { status: 404 })
+    body.content = { session_id: body.content.session_id, message_id: body.content.message_id, explanation }
+    body.source_document_id = explanation.citations?.[0]?.document_id
+    body.source_page = explanation.citations?.[0]?.page_number
+  }
+  let sourceDocumentId = typeof body.source_document_id === "string" ? body.source_document_id : null
   if (sourceDocumentId) {
     const { data: sourceDocument } = await supabase.from("documents").select("id")
       .eq("id", sourceDocumentId).eq("course_id", course.id).single()
-    if (!sourceDocument) return NextResponse.json({ error: "Source document not found." }, { status: 404 })
+    if (!sourceDocument && body.item_type === "explanation") sourceDocumentId = null
+    else if (!sourceDocument) return NextResponse.json({ error: "Source document not found." }, { status: 404 })
   }
 
-  const { data: item, error } = await supabase.from("library_items").insert({
+  const { data: item, error } = await (await createServiceClient()).from("library_items").insert({
     user_id: user.id,
     course_id: course.id,
     item_type: body.item_type,
     title: body.title.trim().slice(0, 240),
     content: body.content,
     source_document_id: sourceDocumentId,
-    source_page: Number.isInteger(body.source_page) && body.source_page > 0 ? body.source_page : null,
+    source_page: sourceDocumentId && Number.isInteger(body.source_page) && body.source_page > 0 ? body.source_page : null,
   }).select().single()
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   return NextResponse.json(item, { status: 201 })

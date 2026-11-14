@@ -22,6 +22,8 @@ import {
   type DiagnosticReport,
   type EvaluationResult,
   type LearningMode,
+  type NotebookContext,
+  type PublicCard,
   type PublicCorrection,
   type PublicExercise,
   type PublicExplanation,
@@ -34,6 +36,7 @@ export type ChatStatus = "ready" | "connecting" | "submitted" | "streaming" | "e
 
 interface UseSocraChatOpts {
   sessionId: string
+  recoverInterrupted?: boolean
   courseId: string
   /** Optional per-request LLM config from the Settings dialog. Google and Groq
    *  are forwarded to the backend; other providers are not yet supported there. */
@@ -52,430 +55,392 @@ interface UseSocraChatReturn {
   messages: UIMessage[]
   status: ChatStatus
   progress: string
+  connection: string
+  stop: () => void
   error: Error | null
-  sendMessage: (m: { text: string; displayText?: string; mode?: LearningMode }) => void
+  sendMessage: (m: ChatMessageRequest) => void
   submitAttempt: (attempt: { exerciseId: string; answer: string; hintsUsed: number }) => void
   revealSolution: (exerciseId: string) => void
   restoreExercise: () => void
   setMessages: Dispatch<SetStateAction<UIMessage[]>>
   regenerate: () => void
+  canRegenerate: boolean
+  interrupted: { text: string; mode: LearningMode } | null
   /** Force-close the underlying socket. Mostly useful for tests. */
   disconnect: () => void
 }
 
-function newId(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID()
-  }
-  return `m_${Date.now()}_${Math.random().toString(36).slice(2)}`
+type ChatMessageRequest = { text: string; displayText?: string; mode?: LearningMode; notebook?: NotebookContext }
+
+type Turn = {
+  id: string
+  body: Record<string, unknown>
+  display?: string
+  sequence: number
+  sent: boolean
 }
 
-function makeUserMessage(text: string): UIMessage {
-  return {
-    id: newId(),
-    role: "user",
-    parts: [{ type: "text", text }],
-  } as UIMessage
-}
-
-function makeAssistantStub(): UIMessage {
-  return {
-    id: newId(),
-    role: "assistant",
-    parts: [{ type: "text", text: "" }],
-  } as UIMessage
-}
-
-function appendToLastAssistantText(messages: UIMessage[], chunk: string): UIMessage[] {
-  if (messages.length === 0) return messages
-  const last = messages[messages.length - 1]
-  if (last.role !== "assistant") return messages
-
-  const newParts = last.parts.map((p, i) => {
-    if (i === 0 && p.type === "text") {
-      return { ...p, text: (p.text ?? "") + chunk }
-    }
-    return p
-  })
-  return [...messages.slice(0, -1), { ...last, parts: newParts } as UIMessage]
-}
-
-function attachAssistantMetadata(messages: UIMessage[], key: string, value: unknown): UIMessage[] {
-  const index = messages.findLastIndex((message) => message.role === "assistant")
-  if (index < 0) return messages
-  const next = [...messages]
-  const target = next[index] as UIMessage & { metadata?: Record<string, unknown> }
-  next[index] = { ...target, metadata: { ...target.metadata, [key]: value } } as UIMessage
-  return next
+function localMessage(id: string, role: "user" | "assistant", text: string): UIMessage {
+  return { id, role, parts: [{ type: "text", text }] }
 }
 
 export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
-  const { sessionId, courseId, llmConfig, language, onDiagnostic, onContext, onExercise, onExplanation, onCorrection, onSolution, onError } = opts
-
+  const { sessionId, courseId, recoverInterrupted } = opts
+  const recoveryKey = "socra:turn:" + sessionId
   const [messages, setMessages] = useState<UIMessage[]>([])
-  // Start in "ready" so the chat input is enabled right away — the WS only
-  // opens lazily when the user actually sends a message.
   const [status, setStatus] = useState<ChatStatus>("ready")
   const [progress, setProgress] = useState("")
+  const [connection, setConnection] = useState("Disconnected")
+  const [interrupted, setInterrupted] = useState<{ text: string; mode: LearningMode } | null>(null)
+  const [canRegenerate, setCanRegenerate] = useState(false)
   const [error, setError] = useState<Error | null>(null)
+  const active = useRef<Turn | null>(null)
+  const last = useRef<Turn | null>(null)
+  const retryable = useRef(false)
+  const socket = useRef<WebSocket | null>(null)
+  const ready = useRef<Promise<WebSocket> | null>(null)
+  const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const frame = useRef(0)
+  const buffer = useRef("")
+  const reconnect = useRef<(() => void) | null>(null)
+  const callbacks = useRef(opts)
+  useEffect(() => { callbacks.current = opts }, [opts])
 
-  const socketRef = useRef<WebSocket | null>(null)
-  const lastUserTextRef = useRef<string>("")
-  const lastDisplayTextRef = useRef<string>("")
-  const lastModeRef = useRef<LearningMode>("socratic")
-  const pendingMessageRef = useRef<{ text: string; displayText: string; mode: LearningMode } | null>(null)
-  const turnInFlightRef = useRef(false)
-  // Refs to avoid recreating the WS handlers on every render.
-  const onDiagnosticRef = useRef(onDiagnostic)
-  const onContextRef = useRef(onContext)
-  const onExerciseRef = useRef(onExercise)
-  const onExplanationRef = useRef(onExplanation)
-  const onCorrectionRef = useRef(onCorrection)
-  const onSolutionRef = useRef(onSolution)
-  const onErrorRef = useRef(onError)
-  const llmConfigRef = useRef(llmConfig)
-  useEffect(() => { onDiagnosticRef.current = onDiagnostic }, [onDiagnostic])
-  useEffect(() => { onContextRef.current = onContext }, [onContext])
-  useEffect(() => { onExerciseRef.current = onExercise }, [onExercise])
-  useEffect(() => { onExplanationRef.current = onExplanation }, [onExplanation])
-  useEffect(() => { onCorrectionRef.current = onCorrection }, [onCorrection])
-  useEffect(() => { onSolutionRef.current = onSolution }, [onSolution])
-  useEffect(() => { onErrorRef.current = onError }, [onError])
-  useEffect(() => { llmConfigRef.current = llmConfig }, [llmConfig])
+  const updateDraft = useCallback((turn: Turn, update: (message: UIMessage) => UIMessage) => {
+    setMessages((previous) => previous.map((message) => message.id === turn.id ? update(message) : message))
+  }, [])
 
-  // ---------------------------------------------------------------------
-  // Socket lifecycle: open lazily on first sendMessage, close on unmount.
-  // ---------------------------------------------------------------------
+  const flush = useCallback(() => {
+    if (frame.current) cancelAnimationFrame(frame.current)
+    frame.current = 0
+    const text = buffer.current
+    buffer.current = ""
+    const turn = active.current
+    if (turn && text) updateDraft(turn, (message) => {
+      const part = message.parts[0]
+      return { ...message, parts: [{ type: "text", text: (part?.type === "text" ? part.text : "") + text }] }
+    })
+  }, [updateDraft])
+
+  const finish = useCallback((partial: boolean, stage = "") => {
+    flush()
+    clearTimeout(timeout.current)
+    const turn = active.current
+    if (partial && turn) updateDraft(turn, (message) => ({
+      ...message, metadata: { ...(message.metadata as object), partial: true },
+    }))
+    active.current = null
+    retryable.current = partial
+    if (!partial && turn) {
+      try { sessionStorage.removeItem(recoveryKey) } catch { /* Storage is optional. */ }
+    }
+    setCanRegenerate(Boolean(turn && (partial || !turn.body.action)))
+    setProgress(stage)
+    setStatus("ready")
+  }, [flush, recoveryKey, updateDraft])
+
+  const fail = useCallback((cause: unknown) => {
+    const failure = cause instanceof Error ? cause : new Error("Could not reach the tutor. Try again.")
+    finish(true)
+    setStatus("error")
+    setError(failure)
+    callbacks.current.onError?.(failure)
+  }, [finish])
+
+  const waitForTurn = useCallback(() => {
+    clearTimeout(timeout.current)
+    timeout.current = setTimeout(() => {
+      fail(new Error("The tutor stopped responding. Try again."))
+      socket.current?.close()
+    }, 200_000)
+  }, [fail])
+
   const ensureSocket = useCallback((): Promise<WebSocket> => {
-    return new Promise((resolve, reject) => {
-      const existing = socketRef.current
-      if (existing && existing.readyState === WebSocket.OPEN) {
-        resolve(existing)
-        return
-      }
-      if (existing && existing.readyState === WebSocket.CONNECTING) {
-        existing.addEventListener("open", () => resolve(existing), { once: true })
-        existing.addEventListener("error", () => reject(new Error("WebSocket failed to open")), { once: true })
-        return
-      }
-
-      setStatus("connecting")
-      let ws: WebSocket
-      try {
-        ws = new WebSocket(buildChatWsUrl(sessionId))
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error("Failed to construct WebSocket")
-        setStatus("error")
-        setError(e)
-        onErrorRef.current?.(e)
-        reject(e)
-        return
-      }
-
-      socketRef.current = ws
-
+    if (ready.current && socket.current &&
+        (socket.current.readyState === WebSocket.CONNECTING || socket.current.readyState === WebSocket.OPEN)) {
+      return ready.current
+    }
+    setConnection("Connecting")
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(buildChatWsUrl(sessionId))
+    } catch (cause) {
+      setConnection("Disconnected")
+      return Promise.reject(cause)
+    }
+    socket.current = ws
+    ready.current = new Promise<WebSocket>((resolve, reject) => {
+      let denied = false
+      const handshake = setTimeout(() => {
+        reject(new Error("The tutor could not connect in time. Try again."))
+        ws.close()
+      }, 85_000)
       ws.addEventListener("open", () => {
-        resolve(ws)
+        void (async () => {
+          const { data } = await createClient().auth.getSession()
+          if (!data.session?.access_token) {
+            denied = true
+            throw new Error("Sign in again to open this inquiry.")
+          }
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ action: "authenticate", version: 2, courseId, accessToken: data.session.access_token }))
+          }
+        })().catch((cause: unknown) => { reject(cause); ws.close() })
       }, { once: true })
-
-      ws.addEventListener("error", () => {
-        const e = new Error("WebSocket error — is the backend running?")
-        setStatus("error")
-        setError(e)
-        onErrorRef.current?.(e)
-        reject(e)
+      ws.addEventListener("error", () => reject(new Error("Could not connect to the tutor.")), { once: true })
+      ws.addEventListener("close", (event) => {
+        clearTimeout(handshake)
+        reject(new Error("The tutor disconnected. Try again."))
+        if (socket.current !== ws) return
+        socket.current = null
+        ready.current = null
+        setConnection("Disconnected")
+        if (active.current) fail(new Error("The tutor disconnected. Retry to recover the response."))
+        if (!denied && event.code !== 1000 && event.code !== 1008) reconnect.current?.()
       })
-
-      ws.addEventListener("close", () => {
-        // Only mark error if a turn was in flight; otherwise just go idle.
-        setStatus((prev) => (prev === "streaming" || prev === "submitted" ? "error" : prev))
-      })
-
-      ws.addEventListener("message", (ev) => {
-        const msg = parseServerMessage(typeof ev.data === "string" ? ev.data : "")
-        if (!msg) return
-
+      ws.addEventListener("message", (event) => {
+        if (socket.current !== ws) return
+        const msg = parseServerMessage(typeof event.data === "string" ? event.data : "")
+        if (!msg || (msg.session_id && msg.session_id !== sessionId)) return
+        if (msg.type === "connected") {
+          clearTimeout(handshake)
+          setConnection("Connected")
+          resolve(ws)
+          return
+        }
+        if (msg.type === "error" && typeof msg.content !== "string" && msg.content.code === "AUTH_REQUIRED") {
+          denied = true
+          const authError = Object.assign(new Error(msg.content.message), { code: msg.content.code })
+          reject(authError)
+          if (active.current) fail(authError)
+          ws.close()
+          return
+        }
+        if (msg.type === "context_update" || msg.type === "context") {
+          callbacks.current.onContext?.(msg.content)
+          return
+        }
+        const turn = active.current
+        if (!turn || (msg.request_id && msg.request_id !== turn.id)) return
+        if (msg.sequence !== undefined) {
+          if (msg.sequence <= turn.sequence) return
+          turn.sequence = msg.sequence
+        }
+        waitForTurn()
+        const attach = (key: string, value: unknown) => {
+          updateDraft(turn, (message) => ({
+            ...message, metadata: { ...(message.metadata as object), [key]: value },
+          }))
+        }
+        const onCard = (card: PublicCard) => {
+          attach(card.kind, card.card)
+          switch (card.kind) {
+            case "exercise": callbacks.current.onExercise?.(card.card); break
+            case "explanation": callbacks.current.onExplanation?.(card.card); break
+            case "correction": callbacks.current.onCorrection?.(card.card); break
+            case "solution": callbacks.current.onSolution?.(card.card); break
+          }
+        }
         switch (msg.type) {
-          case "diagnostic": {
-            onDiagnosticRef.current?.(msg.content)
+          case "request_accepted":
+            setProgress("Waiting for the tutor.")
             break
-          }
+          case "diagnostic":
+            callbacks.current.onDiagnostic?.(msg.content)
+            break
+          case "content_delta":
           case "token": {
-            const chunk = msg.content
-            if (!chunk) break
-            setStatus("streaming")
-            setMessages((prev) => {
-              // Promote the assistant placeholder once the first token arrives.
-              const last = prev[prev.length - 1]
-              if (!last || last.role !== "assistant") {
-                return [...prev, { id: newId(), role: "assistant", parts: [{ type: "text", text: chunk }] } as UIMessage]
-              }
-              return appendToLastAssistantText(prev, chunk)
-            })
+            const text = msg.type === "token" ? msg.content : msg.content.text
+            if (text === null) {
+              flush()
+              updateDraft(turn, (message) => ({ ...message, parts: [{ type: "text", text: "" }] }))
+            } else if (text) {
+              buffer.current += text
+              if (!frame.current) frame.current = requestAnimationFrame(flush)
+              setStatus("streaming")
+            }
             break
           }
-          case "context": {
-            onContextRef.current?.(msg.content)
+          case "card_ready": onCard(msg.content); break
+          case "exercise": onCard({ kind: "exercise", card: msg.content }); break
+          case "explanation": onCard({ kind: "explanation", card: msg.content }); break
+          case "correction": onCard({ kind: "correction", card: msg.content }); break
+          case "solution": onCard({ kind: "solution", card: msg.content }); break
+          case "response_complete":
+            flush()
+            updateDraft(turn, (message) => ({
+              ...message,
+              id: msg.content.message_id || message.id,
+              metadata: { ...(message.metadata as object), persisted: Boolean(msg.content.message_id) },
+              parts: [{ type: "text", text: msg.content.text }],
+            }))
+            finish(false)
             break
-          }
-          case "exercise": {
-            onExerciseRef.current?.(msg.content)
-            setMessages((prev) => attachAssistantMetadata(prev, "exercise", msg.content))
-            setStatus("streaming")
+          case "cancelled": finish(true, "Generation stopped."); break
+          case "done": finish(false); break
+          case "progress": setProgress(msg.content.stage); break
+          case "error":
+            fail(typeof msg.content === "string" ? new Error(msg.content)
+              : Object.assign(new Error(msg.content.message), { code: msg.content.code }))
             break
-          }
-          case "explanation": {
-            onExplanationRef.current?.(msg.content)
-            setMessages((prev) => attachAssistantMetadata(prev, "explanation", msg.content))
-            setStatus("streaming")
-            break
-          }
-          case "correction": {
-            onCorrectionRef.current?.(msg.content)
-            setMessages((prev) => attachAssistantMetadata(prev, "correction", msg.content))
-            setStatus("streaming")
-            break
-          }
-          case "solution": {
-            onSolutionRef.current?.(msg.content)
-            break
-          }
-          case "done": {
-            turnInFlightRef.current = false
-            setProgress("")
-            setStatus("ready")
-            break
-          }
-          case "progress": {
-            setProgress(msg.content.stage)
-            break
-          }
-          case "error": {
-            turnInFlightRef.current = false
-            setProgress("")
-            const content = msg.content
-            const e = new Error(typeof content === "string" ? content || "Backend error" : content.message)
-            if (typeof content !== "string") Object.assign(e, { code: content.code })
-            setStatus("error")
-            setError(e)
-            onErrorRef.current?.(e)
-            break
-          }
         }
       })
     })
-  }, [sessionId])
+    return ready.current
+  }, [courseId, fail, finish, flush, sessionId, updateDraft, waitForTurn])
 
-  // ---------------------------------------------------------------------
-  // Public actions
-  // ---------------------------------------------------------------------
-  const sendMessage = useCallback(
-    (m: { text: string; displayText?: string; mode?: LearningMode }) => {
-      const text = (m.text ?? "").trim()
-      if (!text || turnInFlightRef.current) return
-      turnInFlightRef.current = true
-      const mode = m.mode ?? "socratic"
-      const displayText = (m.displayText ?? text).trim().slice(0, 500) || text.slice(0, 500)
-      setError(null)
-      setProgress(mode === "explain" ? "Reviewing your course material…" : mode === "exercise" ? "Finding relevant course material…" : "Connecting to your tutor…")
-      lastUserTextRef.current = text
-      lastDisplayTextRef.current = displayText
-      lastModeRef.current = mode
-      pendingMessageRef.current = { text, displayText, mode }
-      setStatus("submitted")
-      setMessages((prev) => [...prev, makeUserMessage(displayText), makeAssistantStub()])
+  const start = useCallback((turn: Turn, reuse: boolean) => {
+    if (active.current) return
+    active.current = turn
+    last.current = turn
+    retryable.current = false
+    setCanRegenerate(false)
+    setInterrupted(null)
+    setStatus("submitted")
+    setProgress(connection === "Connected" ? "Waiting for the tutor." : "Connecting to the tutor.")
+    setError(null)
+    if (turn.display) {
+      try { sessionStorage.setItem(recoveryKey, JSON.stringify({ id: turn.id, body: turn.body, display: turn.display })) }
+      catch { /* The active turn can still be retried in memory. */ }
+      const display = turn.display
+      setMessages((previous) => {
+        const history = reuse ? previous.filter((message) =>
+          message.id !== turn.id && message.id !== turn.id + ":user" &&
+          (message.metadata as { request_id?: string } | undefined)?.request_id !== turn.id
+        ) : previous
+        const notebookAction = (turn.body.notebook as NotebookContext | undefined)?.action
+        const metadata = notebookAction ? { notebook_action: notebookAction, request_id: turn.id } : undefined
+        return [...history, { ...localMessage(turn.id + ":user", "user", display), metadata },
+          { ...localMessage(turn.id, "assistant", ""), metadata }]
+      })
+    }
+    waitForTurn()
+    void ensureSocket().then(async (ws) => {
+      const { data } = await createClient().auth.getSession()
+      if (active.current !== turn) return
+      if (!data.session?.access_token) throw new Error("Sign in again to continue this inquiry.")
+      const { language, llmConfig } = callbacks.current
+      const config = llmConfig?.provider === "google" || llmConfig?.provider === "groq" ? llmConfig : undefined
+      ws.send(JSON.stringify({
+        ...turn.body, requestId: turn.id, courseId, sessionId, language,
+        accessToken: data.session.access_token, ...config,
+      }))
+      turn.sent = true
+    }).catch((cause: unknown) => { if (active.current === turn) fail(cause) })
+  }, [connection, courseId, ensureSocket, fail, recoveryKey, sessionId, waitForTurn])
 
-      ensureSocket()
-        .then(async (ws) => {
-          const pending = pendingMessageRef.current
-          if (pending == null) return
-          pendingMessageRef.current = null
-          const cfg = llmConfigRef.current
-          // Only forward keys for providers supported by the Python backend.
-          const forwardKey = cfg?.provider === "google" || cfg?.provider === "groq" ? cfg : undefined
-          let accessToken: string | undefined
-          if (pending.mode === "exercise" || pending.mode === "explain") {
-            const { data, error: authError } = await createClient().auth.getSession()
-            if (authError || !data.session?.access_token) {
-              throw new Error("Sign in again before requesting course-based practice.")
-            }
-            accessToken = data.session.access_token
-          }
-          ws.send(
-            JSON.stringify({
-              message: pending.text,
-              ...(pending.displayText !== pending.text ? { displayText: pending.displayText } : {}),
-              courseId,
-              sessionId,
-              mode: pending.mode,
-              language,
-              ...(accessToken ? { accessToken } : {}),
-              ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
-              ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
-              ...(forwardKey?.model ? { model: forwardKey.model } : {}),
-            })
-          )
-        })
-        .catch((err: unknown) => {
-          turnInFlightRef.current = false
-          const e = err instanceof Error ? err : new Error("Could not send your message")
-          setStatus("error")
-          setError(e)
-          onErrorRef.current?.(e)
-        })
-    },
-    [courseId, sessionId, language, ensureSocket]
-  )
+  const startTurn = useCallback((body: Turn["body"], display?: string) => {
+    start({ id: crypto.randomUUID(), body, display, sequence: 0, sent: false }, false)
+  }, [start])
+
+  const stop = useCallback(() => {
+    const turn = active.current
+    if (!turn) return
+    if (turn.sent && socket.current?.readyState === WebSocket.OPEN) {
+      socket.current.send(JSON.stringify({ action: "cancel", requestId: turn.id }))
+      setProgress("Stopping generation.")
+      return
+    }
+    finish(true, "Generation stopped.")
+  }, [finish])
+
+  const sendMessage = useCallback(({ text, displayText, mode = "socratic", notebook }: ChatMessageRequest) => {
+    const message = text.trim()
+    if (!message) return
+    const display = displayText?.trim() ? displayText.trim().slice(0, 500) : message
+    startTurn({ message, ...(displayText?.trim() ? { displayText: display } : {}), mode, ...(notebook ? { notebook } : {}) }, display)
+  }, [startTurn])
 
   const regenerate = useCallback(() => {
-    const last = lastUserTextRef.current
-    if (!last) return
-    // Trim the last assistant turn (if any) before resending.
-    setMessages((prev) => {
-      if (prev.length === 0) return prev
-      const tail = prev[prev.length - 1]
-      return tail.role === "assistant" ? prev.slice(0, -1) : prev
-    })
-    sendMessage({ text: last, displayText: lastDisplayTextRef.current, mode: lastModeRef.current })
-  }, [sendMessage])
+    const previous = last.current
+    if (!previous || active.current) return
+    if (retryable.current) {
+      start({ ...previous, sequence: 0, sent: false }, true)
+    } else if (!previous.body.action) {
+      startTurn(previous.body, previous.display)
+    }
+  }, [start, startTurn])
 
-  const submitAttempt = useCallback(
-    ({ exerciseId, answer, hintsUsed }: { exerciseId: string; answer: string; hintsUsed: number }) => {
-      const trimmed = answer.trim()
-      if (!trimmed || !exerciseId || turnInFlightRef.current) return
-      let displayAnswer = trimmed
-      try {
-        const decoded: unknown = JSON.parse(trimmed)
-        if (Array.isArray(decoded) && decoded.every((value) => typeof value === "string")) {
-          displayAnswer = decoded.map((value, index) => `Blank ${index + 1}: ${value}`).join("\n")
-        }
-      } catch {
-        // Existing short-answer submissions are plain text.
+  const submitAttempt = useCallback(({ exerciseId, answer, hintsUsed }: { exerciseId: string; answer: string; hintsUsed: number }) => {
+    const trimmed = answer.trim()
+    if (!trimmed || !exerciseId) return
+    let display = trimmed
+    try {
+      const decoded: unknown = JSON.parse(trimmed)
+      if (Array.isArray(decoded) && decoded.every((value) => typeof value === "string")) {
+        display = decoded.map((value, index) => `Blank ${index + 1}: ${value}`).join("\n")
       }
-      turnInFlightRef.current = true
-      setError(null)
-      setProgress("Reviewing your answer…")
-      setStatus("submitted")
-      setMessages((prev) => [...prev, makeUserMessage(displayAnswer), makeAssistantStub()])
-      ensureSocket()
-        .then(async (ws) => {
-          const { data, error: authError } = await createClient().auth.getSession()
-          if (authError || !data.session?.access_token) {
-            throw new Error("Sign in again before submitting an answer.")
-          }
-          const cfg = llmConfigRef.current
-          const forwardKey = cfg?.provider === "google" || cfg?.provider === "groq" ? cfg : undefined
-          ws.send(JSON.stringify({
-            action: "submit_attempt",
-            exerciseId,
-            answer: trimmed,
-            ...(displayAnswer !== trimmed ? { displayText: displayAnswer } : {}),
-            hintsUsed,
-            courseId,
-            sessionId,
-            mode: "exercise",
-            language,
-            accessToken: data.session.access_token,
-            ...(forwardKey?.apiKey ? { apiKey: forwardKey.apiKey } : {}),
-            ...(forwardKey?.provider ? { provider: forwardKey.provider } : {}),
-            ...(forwardKey?.model ? { model: forwardKey.model } : {}),
-          }))
-        })
-        .catch((err: unknown) => {
-          turnInFlightRef.current = false
-          const e = err instanceof Error ? err : new Error("Could not submit your answer")
-          setStatus("error")
-          setError(e)
-          onErrorRef.current?.(e)
-        })
-    },
-    [courseId, sessionId, language, ensureSocket]
-  )
+    } catch {
+      // Plain-text answers are valid.
+    }
+    startTurn({ action: "submit_attempt", exerciseId, answer: trimmed, displayText: display, hintsUsed, mode: "exercise" }, display)
+  }, [startTurn])
 
-  const revealSolution = useCallback(
-    (exerciseId: string) => {
-      if (!exerciseId || turnInFlightRef.current) return
-      turnInFlightRef.current = true
-      setError(null)
-      setStatus("submitted")
-      ensureSocket()
-        .then(async (ws) => {
-          const { data, error: authError } = await createClient().auth.getSession()
-          if (authError || !data.session?.access_token) {
-            throw new Error("Sign in again before revealing the solution.")
-          }
-          ws.send(JSON.stringify({
-            action: "reveal_solution",
-            exerciseId,
-            courseId,
-            sessionId,
-            mode: "exercise",
-            accessToken: data.session.access_token,
-          }))
-        })
-        .catch((err: unknown) => {
-          turnInFlightRef.current = false
-          const e = err instanceof Error ? err : new Error("Could not reveal the solution")
-          setStatus("error")
-          setError(e)
-          onErrorRef.current?.(e)
-        })
-    },
-    [courseId, sessionId, ensureSocket]
-  )
+  const revealSolution = useCallback((exerciseId: string) => {
+    if (exerciseId) startTurn({ action: "reveal_solution", exerciseId, mode: "exercise" })
+  }, [startTurn])
 
   const restoreExercise = useCallback(() => {
-    setError(null)
-    setStatus("submitted")
-    ensureSocket()
-      .then(async (ws) => {
-        const { data, error: authError } = await createClient().auth.getSession()
-        if (authError || !data.session?.access_token) {
-          throw new Error("Sign in again to restore this exercise.")
-        }
-        ws.send(JSON.stringify({
-          action: "restore_exercise",
-          courseId,
-          sessionId,
-          mode: "exercise",
-          accessToken: data.session.access_token,
-        }))
-      })
-      .catch((err: unknown) => {
-        const e = err instanceof Error ? err : new Error("Could not restore the exercise")
-        setStatus("error")
-        setError(e)
-        onErrorRef.current?.(e)
-      })
-  }, [courseId, sessionId, ensureSocket])
+    startTurn({ action: "restore_exercise", mode: "exercise" })
+  }, [startTurn])
 
   const disconnect = useCallback(() => {
-    const ws = socketRef.current
-    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000, "client disconnect")
-    socketRef.current = null
-    setStatus("ready")
-  }, [])
+    const ws = socket.current
+    socket.current = null
+    ready.current = null
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000)
+    finish(false)
+    setConnection("Disconnected")
+  }, [finish])
 
-  // Close socket when the consumer unmounts (e.g. navigating away).
   useEffect(() => {
-    return () => {
-      const ws = socketRef.current
-      if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000, "unmount")
-      socketRef.current = null
+    let retries = 0
+    let retryTimer: ReturnType<typeof setTimeout>
+    const connect = () => {
+      void ensureSocket().then(() => { retries = 0 }).catch(() => {})
     }
-  }, [])
+    reconnect.current = () => {
+      if (retries >= 3) return
+      clearTimeout(retryTimer)
+      retryTimer = setTimeout(connect, 1_000 * 2 ** retries++)
+    }
+    retryTimer = setTimeout(connect, 0)
+    return () => {
+      reconnect.current = null
+      clearTimeout(retryTimer)
+      clearTimeout(timeout.current)
+      if (frame.current) cancelAnimationFrame(frame.current)
+      frame.current = 0
+      buffer.current = ""
+      active.current = null
+      last.current = null
+      const ws = socket.current
+      socket.current = null
+      ready.current = null
+      if (ws && ws.readyState !== WebSocket.CLOSED) ws.close(1000)
+    }
+  }, [ensureSocket])
 
-  return {
-    messages,
-    status,
-    progress,
-    error,
-    sendMessage,
-    submitAttempt,
-    revealSolution,
-    restoreExercise,
-    setMessages,
-    regenerate,
-    disconnect,
-  }
+  useEffect(() => {
+    if (!recoverInterrupted) return
+    const timer = setTimeout(() => {
+      if (active.current || last.current) return
+      try {
+        const raw = sessionStorage.getItem(recoveryKey)
+        if (!raw) return
+        const saved = JSON.parse(raw) as Partial<Turn>
+        if (typeof saved.id !== "string" || !saved.body || typeof saved.display !== "string") return
+        last.current = { id: saved.id, body: saved.body, display: saved.display, sequence: 0, sent: false }
+        retryable.current = true
+        const mode = saved.body.mode
+        setInterrupted({ text: saved.display, mode: mode === "exercise" || mode === "explain" ? mode : "socratic" })
+        setProgress("Recover the last request.")
+        setCanRegenerate(true)
+      } catch { /* An invalid recovery record does not block chat. */ }
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [recoverInterrupted, recoveryKey])
+
+  return { messages, status, progress, connection, stop, error, sendMessage, submitAttempt, revealSolution,
+    restoreExercise, setMessages, regenerate, canRegenerate, interrupted, disconnect }
 }

@@ -1,28 +1,9 @@
 """Server-only persistence for mixed course exams."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from db.supabase_client import get_supabase
-
-
-def create_exam(
-    *, session_id: str, course_id: str, user_id: str, topic: str,
-    exercise_ids: list[str], requested_types: list[str],
-) -> dict[str, Any]:
-    result = get_supabase().table("exams").insert({
-        "session_id": session_id,
-        "course_id": course_id,
-        "user_id": user_id,
-        "topic": topic,
-        "exercise_ids": exercise_ids,
-        "requested_types": requested_types,
-        "status": "in_progress",
-    }).execute()
-    if not result.data:
-        raise RuntimeError("Supabase did not return the created exam")
-    return result.data[0]
 
 
 def get_exam_for_owner(*, exam_id: str, user_id: str) -> dict[str, Any] | None:
@@ -68,46 +49,24 @@ def get_exam_exercises(exam: dict[str, Any]) -> list[dict[str, Any]]:
     return [by_id[exercise_id] for exercise_id in ids if exercise_id in by_id]
 
 
-def save_exam_answer(*, exam: dict[str, Any], exercise_id: str, answer: str) -> dict[str, Any]:
-    if exam.get("status") != "in_progress":
-        raise ValueError("This exam is already submitted")
-    ids = [str(value) for value in exam.get("exercise_ids") or []]
-    if exercise_id not in ids:
-        raise ValueError("This question does not belong to the exam")
-    answers = dict(exam.get("answers") or {})
-    answers[exercise_id] = answer
-    result = (
-        get_supabase().table("exams").update({"answers": answers})
-        .eq("id", exam["id"]).eq("user_id", exam["user_id"])
-        .eq("status", "in_progress").select("*").execute()
-    )
-    if not result.data:
-        raise ValueError("This exam is no longer accepting answers")
-    return result.data[0]
+def get_exam_job_exam(exam_id: str) -> dict[str, Any] | None:
+    rows = get_supabase().table("exams").select("*").eq("id", exam_id).limit(1).execute().data
+    return rows[0] if rows else None
 
 
-def save_exam_results(*, exam: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, Any]:
-    result = (
-        get_supabase().table("exams").update({"results": results})
-        .eq("id", exam["id"]).eq("user_id", exam["user_id"])
-        .eq("status", "in_progress").select("*").execute()
-    )
-    if not result.data:
-        raise ValueError("This exam is no longer accepting submissions")
-    return result.data[0]
+def get_exam_slots(job_id: str) -> list[dict[str, Any]]:
+    return get_supabase().table("exercises").select("exam_slot,prompt").eq(
+        "exam_job_id", job_id,
+    ).eq("verification_status", "verified").execute().data or []
 
 
-def complete_exam(*, exam: dict[str, Any], score: int, results: list[dict[str, Any]]) -> dict[str, Any]:
-    result = (
-        get_supabase().table("exams").update({
-            "status": "completed",
-            "score": score,
-            "results": results,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        })
-        .eq("id", exam["id"]).eq("user_id", exam["user_id"])
-        .eq("status", "in_progress").select("*").execute()
-    )
-    if not result.data:
-        raise ValueError("This exam was already submitted")
-    return result.data[0]
+def count_exam_slots(exam_id: str) -> int:
+    jobs = get_supabase().table("exam_jobs").select("id").eq("exam_id", exam_id).eq(
+        "kind", "generation",
+    ).limit(1).execute().data
+    if not jobs:
+        return 0
+    result = get_supabase().table("exercises").select("id", count="exact", head=True).eq(
+        "exam_job_id", jobs[0]["id"],
+    ).eq("verification_status", "verified").execute()
+    return result.count or 0

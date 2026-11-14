@@ -1,14 +1,6 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google"
-import { createOpenAI } from "@ai-sdk/openai"
-import { createAnthropic } from "@ai-sdk/anthropic"
+import { DEFAULT_GOOGLE_MODEL } from "@/lib/ai/model-policy"
 
 export type Provider = "google" | "openai" | "anthropic" | "groq"
-
-export interface ModelConfig {
-  provider?: Provider
-  model?: string
-  apiKey?: string
-}
 
 export interface ModelOption {
   id: string
@@ -28,10 +20,9 @@ export const PROVIDERS: ProviderInfo[] = [
     id: "google",
     label: "Google Gemini",
     models: [
-      { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite (default)" },
-      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+      { id: DEFAULT_GOOGLE_MODEL, label: "Gemini 3.5 Flash-Lite (default)" },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash" },
       { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
-      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
     ],
     keyPlaceholder: "AIza...",
     keyPrefix: "AIza",
@@ -74,49 +65,3 @@ export const PROVIDERS: ProviderInfo[] = [
     keyPrefix: "gsk_",
   },
 ]
-
-const DEFAULT_MODEL = "gemini-3.5-flash-lite"
-
-export function resolveModel(config?: ModelConfig) {
-  if (!config?.apiKey) {
-    return createGoogleGenerativeAI({
-      apiKey: process.env.GEMINI_API_KEY!,
-    })(DEFAULT_MODEL)
-  }
-
-  switch (config.provider) {
-    case "openai":
-      return createOpenAI({ apiKey: config.apiKey })(
-        config.model ?? "gpt-4o-mini"
-      )
-    case "anthropic":
-      return createAnthropic({ apiKey: config.apiKey })(
-        config.model ?? "claude-sonnet-4-20250514"
-      )
-    case "groq":
-      return createOpenAI({
-        apiKey: config.apiKey,
-        baseURL: "https://api.groq.com/openai/v1",
-      })(config.model ?? "openai/gpt-oss-120b")
-    case "google":
-    default:
-      return createGoogleGenerativeAI({ apiKey: config.apiKey })(
-        config.model ?? DEFAULT_MODEL
-      )
-  }
-}
-
-export function isQuotaError(error: unknown): boolean {
-  if (!error) return false
-  const msg =
-    error instanceof Error ? error.message : String(error)
-  const lower = msg.toLowerCase()
-  return (
-    lower.includes("quota") ||
-    lower.includes("rate_limit") ||
-    lower.includes("rate limit") ||
-    lower.includes("resource_exhausted") ||
-    lower.includes("429") ||
-    lower.includes("too many requests")
-  )
-}

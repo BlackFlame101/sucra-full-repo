@@ -5,11 +5,13 @@ import json
 import logging
 import re
 import ast
+import asyncio
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agents.metrics import structured_failure
 from agents.llm import get_chat_llm
 from agents.exercise_generator import calculate_safe_expression
 from agents.structured_output import parse_json_object
@@ -288,10 +290,12 @@ async def _grade_once(
         "expected_answer": exercise.get("expected_answer"),
         "common_mistakes": exercise.get("common_mistakes") or [],
         "course_excerpts": source_citations,
+        "notebook_excerpt": (exercise.get("exercise_data") or {}).get("notebook_excerpt", ""),
         "student_answer": answer,
         "previous_format_issue": previous_issue or "none",
     }
     llm = get_chat_llm(
+        agent="correction", request_id=state.get("model_request_id") or state.get("request_id"),
         temperature=0,
         streaming=False,
         api_key=state.get("api_key"),
@@ -316,7 +320,7 @@ async def _grade_once(
     return correction
 
 
-async def run_correcteur(state: SocraState) -> SocraState:
+async def grade_exercise(state: SocraState) -> dict[str, Any]:
     exercise = state.get("exercise_record") or {}
     answer = (state.get("student_answer") or "").strip()
     if not answer or not exercise.get("id"):
@@ -383,7 +387,7 @@ async def run_correcteur(state: SocraState) -> SocraState:
             break
         except (ValueError, TypeError) as exc:
             last_issue = str(exc)
-            logger.warning("Correcteur output attempt %d rejected: %s", attempt_number + 1, last_issue)
+            structured_failure("correction", state, attempt_number + 1, exc)
     if correction is None:
         raise ValueError("Could not grade this answer reliably. Please try submitting it again.")
 
@@ -394,7 +398,8 @@ async def run_correcteur(state: SocraState) -> SocraState:
     citations = [ExerciseCitation.model_validate(item) for item in (exercise.get("citations") or [])]
     hints_used = max(0, min(3, int(state.get("hints_used") or 0)))
     total_score = sum(item.awarded_points for item in correction.criterion_feedback)
-    row = create_attempt({
+    return {
+        **({"chat_request_id": state["request_id"]} if state.get("request_id") else {}),
         "exercise_id": exercise["id"],
         "session_id": state["session_id"],
         "course_id": state["course_id"],
@@ -408,16 +413,21 @@ async def run_correcteur(state: SocraState) -> SocraState:
         "error_category": correction.error_category,
         "citations": [citation.model_dump(mode="json") for citation in citations],
         "next_step": correction.next_step,
-    })
+    }
+
+
+async def run_correcteur(state: SocraState) -> SocraState:
+    grade = await grade_exercise(state)
+    row = await asyncio.to_thread(create_attempt, grade)
     public = PublicCorrection(
         attempt_id=row["id"],
-        total_score=total_score,
-        max_score=max_score,
-        overall_feedback=correction.overall_feedback,
-        error_category=correction.error_category,
-        criterion_feedback=correction.criterion_feedback,
-        citations=citations,
-        next_step=correction.next_step,
-        hints_used=hints_used,
+        total_score=row["total_score"],
+        max_score=row["max_score"],
+        overall_feedback=row["feedback"],
+        error_category=row["error_category"],
+        criterion_feedback=row["criterion_feedback"],
+        citations=row["citations"],
+        next_step=row["next_step"],
+        hints_used=row["hints_used"],
     )
     return {**state, "correction": public.model_dump(mode="json"), "current_node": "correcteur"}

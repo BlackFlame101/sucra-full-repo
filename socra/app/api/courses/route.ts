@@ -1,7 +1,7 @@
 import { createClient } from "@/lib/supabase/server"
 import { NextResponse } from "next/server"
 
-export async function GET() {
+export async function GET(request: Request) {
   const supabase = await createClient()
   const {
     data: { user },
@@ -11,17 +11,22 @@ export async function GET() {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  const { data: courses, error } = await supabase
+  const courseId = new URL(request.url).searchParams.get("course")
+  if (courseId && !/^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i.test(courseId)) {
+    return NextResponse.json({ error: "Invalid course." }, { status: 400 })
+  }
+  const query = supabase
     .from("courses")
     .select("*, documents(count)")
     .eq("user_id", user.id)
     .order("updated_at", { ascending: false })
+  const { data: courses, error } = await (courseId ? query.eq("id", courseId) : query)
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
-  return NextResponse.json(courses)
+  return NextResponse.json(courseId ? courses : courses.filter((course) => !("notebook_private" in course && course.notebook_private)))
 }
 
 export async function POST(request: Request) {

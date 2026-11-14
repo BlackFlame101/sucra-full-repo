@@ -4,8 +4,10 @@ version = "0.1.0"
 description = "Socra multi-agent Socratic tutoring backend (FastAPI + LangGraph)"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "cryptography>=48.0.0",
     "fastapi>=0.136.1",
     "google-generativeai>=0.8.6",
+    "google-genai>=1.75.0",
     "httpx>=0.28.1",
     "langchain>=1.2.17",
     "langchain-google-genai>=4.2.2",

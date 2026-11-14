@@ -1,36 +1,45 @@
 """Authenticated API for generating and submitting mixed course exams."""
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import random
 from typing import Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, model_validator
 
-from agents.exercise_generator import run_exercise_generator
-from agents.llm import provider_error_code, provider_error_message
+from api.security import consume_study_quota
 from db.exams import (
-    complete_exam,
-    create_exam,
+    count_exam_slots,
     get_course_exams,
     get_exam_exercises,
     get_exam_for_owner,
     get_exam_for_session,
-    save_exam_answer,
-    save_exam_results,
 )
-from db.diagnostics import get_language_for_session
 from db.supabase_client import get_supabase
-from graph.orchestrator import get_compiled_graph
-from rag.retriever import get_current_course_sections
+from db.jobs import rpc
+from db.job_credentials import encrypt_job_key
 
-router = APIRouter(prefix="/exams", tags=["exams"])
-logger = logging.getLogger(__name__)
+class ExamRoute(APIRoute):
+    def get_route_handler(self):
+        handle_request = super().get_route_handler()
 
-QUESTION_TYPES = ("short_answer", "multiple_choice", "numerical", "code", "sql")
+        async def handle(request: Request) -> Response:
+            try:
+                return await handle_request(request)
+            except RequestValidationError:
+                # Validation details can contain the request body, including personal model keys.
+                raise HTTPException(status_code=422, detail="Check the exam settings and try again.") from None
+
+        return handle
+
+
+router = APIRouter(prefix="/exams", tags=["exams"], route_class=ExamRoute)
+
 DEFAULT_QUESTION_TYPES = ("short_answer", "multiple_choice", "numerical")
 
 
@@ -107,32 +116,6 @@ def _candidate_scopes(
     return scopes
 
 
-def _fallback_question_types(
-    requested_type: str,
-    generated: list[dict[str, Any]],
-    selected_types: tuple[str, ...] | list[str] = DEFAULT_QUESTION_TYPES,
-) -> list[str]:
-    """Prefer the least-used other formats if this source cannot support one type."""
-    counts = {question_type: 0 for question_type in QUESTION_TYPES}
-    for item in generated:
-        question_type = item.get("exercise_type")
-        if question_type in counts:
-            counts[question_type] += 1
-    alternatives = list(selected_types)
-    if requested_type == "code" and "multiple_choice" not in alternatives:
-        alternatives.append("multiple_choice")
-    return sorted(
-        (
-            question_type for question_type in alternatives
-            if question_type not in (requested_type, "numerical")
-        ),
-        key=lambda question_type: (
-            question_type != "multiple_choice" if requested_type == "code" else False,
-            counts[question_type],
-        ),
-    )
-
-
 def _require_complete_answers(
     exercises: list[dict[str, Any]], exercise_ids: list[Any], answers: dict[str, Any],
 ) -> None:
@@ -168,6 +151,7 @@ class ExamStartRequest(BaseModel):
 class ExamAnswerRequest(BaseModel):
     exercise_id: UUID
     answer: str = Field(min_length=1, max_length=10000)
+    previous_answer: str | None = Field(default=None, max_length=10000)
 
     model_config = {"str_strip_whitespace": True}
 
@@ -191,33 +175,19 @@ def _user_id_from_header(authorization: str) -> str:
     return str(user.id)
 
 
-def _verify_course_session(course_id: str, session_id: str, user_id: str) -> None:
-    client = get_supabase()
-    session = (
-        client.table("sessions").select("course_id")
-        .eq("id", session_id).limit(1).execute()
-    ).data
-    course = (
-        client.table("courses").select("id")
-        .eq("id", course_id).eq("user_id", user_id).limit(1).execute()
-    ).data
-    if not session or str(session[0].get("course_id")) != course_id or not course:
-        raise HTTPException(status_code=404, detail="Course inquiry not found.")
-
-
 @router.get("/course/{course_id}/sessions")
 async def read_course_exam_sessions(
     course_id: UUID,
     authorization: str = Header(default=""),
 ) -> list[dict[str, Any]]:
-    user_id = _user_id_from_header(authorization)
-    course = (
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
+    course = await asyncio.to_thread(lambda: (
         get_supabase().table("courses").select("id")
-        .eq("id", str(course_id)).eq("user_id", user_id).limit(1).execute()
-    ).data
+        .eq("id", str(course_id)).eq("user_id", user_id).limit(1).execute().data
+    ))
     if not course:
         raise HTTPException(status_code=404, detail="Course not found.")
-    return get_course_exams(course_id=str(course_id), user_id=user_id)
+    return await asyncio.to_thread(get_course_exams, course_id=str(course_id), user_id=user_id)
 
 
 def _public_question(exercise: dict[str, Any]) -> dict[str, Any]:
@@ -273,228 +243,141 @@ def _public_exam(exam: dict[str, Any], exercises: list[dict[str, Any]]) -> dict[
                 ) if code_task_mode == "completion" and starter_code.count("____") == len(code_expected_answers) else "",
             })
         results = completed_results
+    total = exam.get("question_count") or len(exam.get("exercise_ids") or [])
+    status = exam["status"]
     return {
         "id": str(exam["id"]),
         "status": exam["status"],
         "topic": exam.get("topic") or "",
         "requested_types": exam.get("requested_types") or list({item.get("exercise_type", "short_answer") for item in exercises}),
-        "questions": [_public_question(row) for row in exercises],
+        "questions": [_public_question(row) for row in exercises] if status in ("in_progress", "completed") else [],
         "answers": exam.get("answers") or {},
         "results": results,
         "score": exam.get("score") if exam.get("status") == "completed" else None,
-        "max_score": len(exam.get("exercise_ids") or []) * 10,
+        "max_score": total * 10,
+        "question_count": total,
+        "error": exam.get("preparation_error"),
+        "progress": {
+            "completed": len(exam.get("results") or []) if status in ("grading","grading_failed")
+                         else exam.get("validated_count", len(exercises)),
+            "total": total,
+        },
     }
+
+
+async def _exam_response(exam: dict[str, Any]) -> dict[str, Any]:
+    if exam["status"] in ("preparing", "preparation_failed"):
+        count = await asyncio.to_thread(count_exam_slots, str(exam["id"]))
+        return _public_exam({**exam, "validated_count": count}, [])
+    exercises = await asyncio.to_thread(get_exam_exercises, exam) if exam["status"] in ("in_progress", "completed") else []
+    return _public_exam(exam, exercises)
+
+
+async def _require_exam_quota(user_id: str, operation: str) -> None:
+    quota = await consume_study_quota(user_id, operation)
+    if quota is None:
+        raise HTTPException(status_code=503, detail="Exam jobs are temporarily unavailable. Retry shortly.")
+    if not quota:
+        raise HTTPException(status_code=429, detail="Exam processing limit reached. Try again later.")
+
+
+def _job_key(api_key: str, session_id: str) -> str | None:
+    try:
+        return encrypt_job_key(api_key, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/start")
 async def start_exam(
-    request: ExamStartRequest,
-    authorization: str = Header(default=""),
+    request: ExamStartRequest, response: Response, authorization: str = Header(default=""),
 ) -> dict[str, Any]:
-    user_id = _user_id_from_header(authorization)
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
     course_id, session_id = str(request.course_id), str(request.session_id)
-    _verify_course_session(course_id, session_id, user_id)
-    labels = {
-        "short_answer": "short-answer",
-        "multiple_choice": "multiple-choice",
-        "numerical": "numerical calculation",
-        "code": "course-language code-completion",
-        "sql": "SQLite SQL query-writing",
-    }
-    scheduled_types = _schedule_question_types(request.question_count, request.exercise_types)
-    sections = await get_current_course_sections(course_id) if not request.topic.strip() else []
-    if sections:
-        random.shuffle(sections)
-    generated: list[dict[str, Any]] = []
-    try:
-        for question_index, exercise_type in enumerate(scheduled_types, start=1):
-            result = None
-            generation_error: ValueError | None = None
-            candidate_types = [exercise_type]
-            for candidate_type in candidate_types:
-                for question_scope in _candidate_scopes(
-                    request.topic, sections, question_index, candidate_type,
-                ):
-                    prompt = f"Create one {labels[candidate_type]} exam question about {question_scope}. Use only the course material."
-                    prompt += f" This is question {question_index} of a mixed {request.question_count}-question exam. Do not repeat earlier questions."
-                    prompt += f" Set its difficulty to {request.difficulty}; match that level in both the reasoning steps and wording."
-                    if candidate_type == "numerical":
-                        prompt += " Include the requested unit in the question."
-                    state: dict[str, Any] = {
-                        "student_message": prompt,
-                        "course_id": course_id,
-                        "session_id": session_id,
-                        "user_id": user_id,
-                        "language": request.language,
-                        "requested_difficulty": request.difficulty,
-                        "provider": request.provider,
-                        "messages": [],
-                    }
-                    if request.api_key:
-                        state["api_key"] = request.api_key
-                    if request.model:
-                        state["model"] = request.model
-                    try:
-                        result = await run_exercise_generator(state)  # includes grounding and independent verification
-                        break
-                    except ValueError as exc:
-                        generation_error = exc
-                        logger.warning(
-                            "Exam question %d (%s) failed verification (%s); considering a fallback",
-                            question_index, candidate_type, type(exc).__name__,
-                        )
-                if result is not None:
-                    break
-                if candidate_type == exercise_type:
-                    fallbacks = _fallback_question_types(
-                        exercise_type, generated, request.exercise_types,
-                    )
-                    candidate_types.extend(fallbacks)
-                    logger.info(
-                        "Exam question %d could not be verified as %s; trying fallback types %s",
-                        question_index, exercise_type, fallbacks,
-                    )
-            if result is None:
-                if generation_error:
-                    raise generation_error
-                raise ValueError(f"Could not generate exam question {question_index}")
-            generated.append(result["exercise"])
-        exam = create_exam(
-            session_id=session_id,
-            course_id=course_id,
-            user_id=user_id,
-            topic=request.topic.strip(),
-            exercise_ids=[item["id"] for item in generated],
-            requested_types=request.exercise_types,
-        )
-    except Exception as exc:
-        logger.exception("Mixed exam generation failed for session %s", session_id)
-        generated_ids = [str(item["id"]) for item in generated]
-        if generated_ids:
-            try:
-                get_supabase().table("exercises").delete().in_("id", generated_ids) \
-                    .eq("session_id", session_id).eq("course_id", course_id).eq("user_id", user_id).execute()
-            except Exception:
-                logger.exception("Could not remove partial exam questions for session %s", session_id)
-        provider_code = provider_error_code(exc)
-        if provider_code:
-            raise HTTPException(
-                status_code=429 if provider_code in ("API_KEY_QUOTA_EXCEEDED", "API_RATE_LIMITED") else 502,
-                detail=f"{provider_code}: {provider_error_message(provider_code)}",
-            ) from exc
-        raise HTTPException(
-            status_code=422,
-            detail="Socra could not verify every requested exam question from this course material. Try a shorter exam, a narrower topic, or check that the course includes values for calculation questions.",
-        ) from exc
-    rows = get_exam_exercises(exam)
-    return _public_exam(exam, rows)
+    plan = request.model_dump(exclude={"api_key", "course_id", "session_id"})
+    plan["topic"] = request.topic.strip()
+    existing = await asyncio.to_thread(get_exam_for_session, session_id=session_id, user_id=user_id)
+    if existing and existing["course_id"] == course_id and existing["status"] != "preparation_failed":
+        if existing["status"] == "preparing":
+            response.status_code = 202
+        return await _exam_response(existing)
+    await _require_exam_quota(user_id, "exam_generation")
+    exam_id = await rpc("queue_exam", {
+        "inquiry": session_id, "course": course_id, "owner": user_id,
+        "plan": plan, "credential": _job_key(request.api_key, session_id),
+    })
+    if not exam_id:
+        raise HTTPException(status_code=404, detail="Course inquiry not found.")
+    exam = await asyncio.to_thread(get_exam_for_owner, exam_id=exam_id, user_id=user_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found.")
+    if exam["status"] == "preparing":
+        response.status_code = 202
+    return await _exam_response(exam)
 
 
 @router.get("/{exam_id}")
-async def read_exam(
-    exam_id: UUID,
-    authorization: str = Header(default=""),
-) -> dict[str, Any]:
-    user_id = _user_id_from_header(authorization)
-    exam = get_exam_for_owner(exam_id=str(exam_id), user_id=user_id)
+async def read_exam(exam_id: UUID, authorization: str = Header(default="")) -> dict[str, Any]:
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
+    exam = await asyncio.to_thread(get_exam_for_owner, exam_id=str(exam_id), user_id=user_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
-    return _public_exam(exam, get_exam_exercises(exam))
+    return await _exam_response(exam)
 
 
 @router.get("/session/{session_id}")
-async def read_exam_for_session(
-    session_id: UUID,
-    authorization: str = Header(default=""),
-) -> dict[str, Any]:
-    user_id = _user_id_from_header(authorization)
-    exam = get_exam_for_session(session_id=str(session_id), user_id=user_id)
+async def read_exam_for_session(session_id: UUID, authorization: str = Header(default="")) -> dict[str, Any]:
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
+    exam = await asyncio.to_thread(get_exam_for_session, session_id=str(session_id), user_id=user_id)
     if not exam:
         raise HTTPException(status_code=404, detail="No exam found for this inquiry.")
-    return _public_exam(exam, get_exam_exercises(exam))
+    return await _exam_response(exam)
 
 
 @router.post("/{exam_id}/answer")
-async def save_answer(
-    exam_id: UUID,
-    request: ExamAnswerRequest,
-    authorization: str = Header(default=""),
-) -> dict[str, str]:
-    user_id = _user_id_from_header(authorization)
-    exam = get_exam_for_owner(exam_id=str(exam_id), user_id=user_id)
-    if not exam:
+async def save_answer(exam_id: UUID, request: ExamAnswerRequest, authorization: str = Header(default="")) -> dict[str, str]:
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
+    status = await rpc("write_exam_answer", {
+        "exam": str(exam_id), "owner": user_id, "question": str(request.exercise_id),
+        "answer": request.answer, "previous": request.previous_answer,
+    })
+    if status == "missing":
         raise HTTPException(status_code=404, detail="Exam not found.")
-    try:
-        save_exam_answer(exam=exam, exercise_id=str(request.exercise_id), answer=request.answer)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if status == "conflict":
+        raise HTTPException(status_code=409, detail="This answer changed in another tab. Reload before saving.")
+    if status != "saved":
+        raise HTTPException(status_code=409, detail="This exam is no longer accepting that answer.")
     return {"status": "saved"}
 
 
 @router.post("/{exam_id}/submit")
 async def submit_exam(
-    exam_id: UUID,
-    request: ExamSubmitRequest,
-    authorization: str = Header(default=""),
+    exam_id: UUID, request: ExamSubmitRequest, response: Response, authorization: str = Header(default=""),
 ) -> dict[str, Any]:
-    user_id = _user_id_from_header(authorization)
-    exam = get_exam_for_owner(exam_id=str(exam_id), user_id=user_id)
+    user_id = await asyncio.to_thread(_user_id_from_header, authorization)
+    exam = await asyncio.to_thread(get_exam_for_owner, exam_id=str(exam_id), user_id=user_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
-    if exam.get("status") != "in_progress":
-        return _public_exam(exam, get_exam_exercises(exam))
-    exercises = get_exam_exercises(exam)
+    if exam["status"] in ("grading", "completed"):
+        if exam["status"] == "grading":
+            response.status_code = 202
+        return await _exam_response(exam)
+    if exam["status"] not in ("in_progress", "grading_failed"):
+        raise HTTPException(status_code=409, detail="Wait for all exam questions before submitting.")
     answers = exam.get("answers") or {}
+    exercises = await asyncio.to_thread(get_exam_exercises, exam)
     _require_complete_answers(exercises, exam.get("exercise_ids") or [], answers)
-
-    results = list(exam.get("results") or [])
-    already_graded = {str(item.get("exercise_id")) for item in results}
-    try:
-        for exercise in exercises:
-            exercise_id = str(exercise["id"])
-            if exercise_id in already_graded:
-                continue
-            state: dict[str, Any] = {
-                "mode": "correct",
-                "session_id": str(exam["session_id"]),
-                "course_id": str(exam["course_id"]),
-                "user_id": user_id,
-                "exercise_record": exercise,
-                "student_answer": str(answers[exercise_id]),
-                "hints_used": 0,
-                "language": get_language_for_session(str(exam["session_id"])),
-                "provider": request.provider,
-                "messages": [],
-            }
-            if request.api_key:
-                state["api_key"] = request.api_key
-            if request.model:
-                state["model"] = request.model
-            corrected = await get_compiled_graph().ainvoke(state)
-            correction = corrected["correction"]
-            results.append({
-                "exercise_id": exercise_id,
-                "exercise_type": exercise.get("exercise_type") or "short_answer",
-                "concept": exercise.get("concept") or "",
-                "prompt": exercise.get("prompt") or "",
-                "answer": answers[exercise_id],
-                "score": correction["total_score"],
-                "max_score": correction["max_score"],
-                "feedback": correction["overall_feedback"],
-                "criterion_feedback": correction["criterion_feedback"],
-                "citations": correction["citations"],
-                "next_step": correction["next_step"],
-            })
-            exam = save_exam_results(exam=exam, results=results)
-        total_score = sum(int(item["score"]) for item in results)
-        completed = complete_exam(exam=exam, score=total_score, results=results)
-    except Exception as exc:
-        logger.exception("Exam grading failed for %s", exam_id)
-        provider_code = provider_error_code(exc)
-        if provider_code:
-            raise HTTPException(
-                status_code=429 if provider_code in ("API_KEY_QUOTA_EXCEEDED", "API_RATE_LIMITED") else 502,
-                detail=f"{provider_code}: {provider_error_message(provider_code)}",
-            ) from exc
-        raise HTTPException(status_code=503, detail="Socra could not grade the exam reliably. Your answers are saved; try submitting again.") from exc
-    return _public_exam(completed, exercises)
+    await _require_exam_quota(user_id, "exam_grading")
+    status = await rpc("queue_exam_grading", {
+        "exam": str(exam_id), "owner": user_id, "expected_answers": answers,
+        "model_options": request.model_dump(exclude={"api_key"}),
+        "credential": _job_key(request.api_key, str(exam["session_id"])),
+    })
+    if status not in ("grading", "completed"):
+        raise HTTPException(status_code=409, detail="Your exam changed while submitting. Reload and retry.")
+    updated = await asyncio.to_thread(get_exam_for_owner, exam_id=str(exam_id), user_id=user_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Exam not found.")
+    if updated["status"] == "grading":
+        response.status_code = 202
+    return await _exam_response(updated)

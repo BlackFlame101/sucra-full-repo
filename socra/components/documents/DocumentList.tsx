@@ -9,6 +9,7 @@ interface DocumentListProps {
   documents: Document[]
   loading: boolean
   onDelete: (id: string) => void
+  onProcessingChange: () => void
 }
 
 function DocumentSkeleton() {
@@ -27,6 +28,7 @@ export function DocumentList({
   documents,
   loading,
   onDelete,
+  onProcessingChange,
 }: DocumentListProps) {
   if (loading) {
     return (
@@ -52,7 +54,7 @@ export function DocumentList({
   return (
     <div className="space-y-2">
       {documents.map((doc) => (
-        <DocumentItem key={doc.id} document={doc} onDelete={onDelete} />
+        <DocumentItem key={doc.id} document={doc} onDelete={onDelete} onProcessingChange={onProcessingChange} />
       ))}
     </div>
   )

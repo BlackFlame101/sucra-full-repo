@@ -1,7 +1,8 @@
 "use client"
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react"
-import { Bookmark, MoreVertical, RotateCcw, ArrowDown, PanelRightClose, PanelRightOpen } from "lucide-react"
+import { Bookmark, MoreVertical, NotebookPen, RotateCcw, ArrowDown, PanelRightClose, PanelRightOpen } from "lucide-react"
+import type { CaptureTarget } from "@/components/notebook/SaveResponseDialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { MessageList } from "./MessageList"
@@ -27,11 +28,14 @@ interface ChatPanelProps {
   input: string
   status: string
   progress?: string
+  connection?: string
+  onStop?: () => void
   messagesLoading: boolean
   error?: Error | null
   onInputChange: (value: string) => void
   onSubmit: () => void
   onRetry?: () => void
+  canRegenerate?: boolean
   onAttach?: () => void
   learningMode: LearningMode
   onLearningModeChange: (mode: LearningMode) => void
@@ -44,14 +48,15 @@ interface ChatPanelProps {
   explanation: PublicExplanation | null
   onDiscussExplanation: (question: string) => void
   onSaveExplanationToLibrary: (explanation: PublicExplanation) => void
-  onSaveExplanationToNotebook: (explanation: PublicExplanation) => void
+  onCaptureResponse: (target: CaptureTarget) => void
+  sourceMessageId?: string | null
   onSaveExerciseToLibrary: (correction: PublicCorrection, solution: PublicSolution) => void
-  onSaveExerciseToNotebook: (correction: PublicCorrection, solution: PublicSolution) => void
   onSaveSessionToLibrary: () => void
   sessionSavedToLibrary: boolean
   savingSessionToLibrary: boolean
   contextOpen: boolean
   onToggleContext: () => void
+  contextToggleRef?: React.Ref<HTMLButtonElement>
 }
 
 export function ChatPanel({
@@ -62,11 +67,14 @@ export function ChatPanel({
   input,
   status,
   progress,
+  connection,
+  onStop,
   messagesLoading,
   error,
   onInputChange,
   onSubmit,
   onRetry,
+  canRegenerate,
   onAttach,
   learningMode,
   onLearningModeChange,
@@ -79,18 +87,20 @@ export function ChatPanel({
   explanation,
   onDiscussExplanation,
   onSaveExplanationToLibrary,
-  onSaveExplanationToNotebook,
+  onCaptureResponse,
+  sourceMessageId,
   onSaveExerciseToLibrary,
-  onSaveExerciseToNotebook,
   onSaveSessionToLibrary,
   sessionSavedToLibrary,
   savingSessionToLibrary,
   contextOpen,
   onToggleContext,
+  contextToggleRef,
 }: ChatPanelProps) {
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const didInitialScrollRef = useRef(false)
   const isNearBottomRef = useRef(true)
+  const captureSelection = useRef("")
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
   const activeExerciseIsInHistory = !messagesLoading && exercise && messages.some((message) => {
     const metadata = (message as UIMessage & { metadata?: Record<string, unknown> }).metadata
@@ -107,7 +117,10 @@ export function ChatPanel({
     }
     updateScrollButton()
     viewport.addEventListener("scroll", updateScrollButton, { passive: true })
-    const resizeObserver = new ResizeObserver(updateScrollButton)
+    const resizeObserver = new ResizeObserver(() => {
+      if (didInitialScrollRef.current && isNearBottomRef.current) viewport.scrollTop = viewport.scrollHeight
+      updateScrollButton()
+    })
     resizeObserver.observe(viewport)
     if (viewport.firstElementChild) resizeObserver.observe(viewport.firstElementChild)
     return () => {
@@ -133,17 +146,26 @@ export function ChatPanel({
     const frame = requestAnimationFrame(() => {
       const viewport = scrollAreaRef.current
       if (!viewport) return
+      if (!didInitialScrollRef.current && sourceMessageId) {
+        const source = document.getElementById(`message-${sourceMessageId}`)
+        if (source) {
+          viewport.scrollTop += source.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+          didInitialScrollRef.current = true
+          isNearBottomRef.current = false
+          return
+        }
+      }
       viewport.scrollTop = viewport.scrollHeight
       didInitialScrollRef.current = true
       isNearBottomRef.current = true
     })
     return () => cancelAnimationFrame(frame)
-  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation?.check_question])
+  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation?.check_question, sourceMessageId])
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       {/* Chat Header */}
-      <div className="flex flex-col gap-3 border-b border-border/40 px-4 py-3 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
+      <div className="flex shrink-0 flex-col gap-3 border-b border-border/40 px-4 py-3 sm:px-6 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <h2 className="min-w-0 flex-1 truncate font-serif text-lg font-medium italic">
             {learningMode === "socratic" ? "Socratic Dialogue" : learningMode === "exercise" ? "Practice Exercises" : "Explain a Topic"}: {sessionTitle}
@@ -152,7 +174,7 @@ export function ChatPanel({
             variant="outline"
             className="shrink-0 border-secondary/30 bg-secondary/10 text-secondary text-[10px] uppercase tracking-wider"
           >
-            Active Session
+            <span role="status">{connection ?? "Active session"}</span>
           </Badge>
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 xl:shrink-0 xl:justify-end">
@@ -186,14 +208,14 @@ export function ChatPanel({
           <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
             <MoreVertical className="h-4 w-4" />
           </Button>
-          <Button type="button" variant="outline" size="icon" className="h-8 w-8 shrink-0" onClick={onToggleContext} aria-label={contextOpen ? "Hide course context" : "Show course context"} title={contextOpen ? "Hide course context" : "Show course context"}>
+          <Button type="button" variant="outline" size="icon" className="h-8 w-8 shrink-0" ref={contextToggleRef} onClick={onToggleContext} aria-expanded={contextOpen} aria-controls="inquiry-context" aria-label={contextOpen ? "Hide course context" : "Show course context"} title={contextOpen ? "Hide course context" : "Show course context"}>
             {contextOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
           </Button>
         </div>
       </div>
 
       {/* Messages */}
-      <div ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+      <div ref={scrollAreaRef} className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain">
         <div className="flex w-full min-w-0 max-w-full flex-col overflow-x-hidden pb-2">
           <MessageList
             messages={messages}
@@ -206,11 +228,26 @@ export function ChatPanel({
               const messageExercise = metadata?.exercise as PublicExercise | undefined
               const messageCorrection = metadata?.correction as PublicCorrection | undefined
               const messageExplanation = metadata?.explanation as PublicExplanation | undefined
+              const canCapture = !metadata?.partial && !messageExercise && metadata?.persisted === true &&
+                (status === "ready" || status === "error" || message.id !== messages.at(-1)?.id)
+              const selectedText = () => {
+                const selection = window.getSelection()
+                const wrapper = document.getElementById(`message-${message.id}`)
+                return selection && wrapper?.contains(selection.anchorNode) && wrapper.contains(selection.focusNode)
+                  ? selection.toString().trim() : ""
+              }
               return (
                 <div className="flex w-full min-w-0 max-w-full flex-col gap-4">
                   {messageExercise && <ExerciseCard key={messageExercise.id} exercise={messageExercise} onNextExercise={onNextExercise} onSubmitAttempt={onSubmitAttempt} disabled={status !== "ready"} submissionLocked={solution?.exercise_id === messageExercise.id} />}
-                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} onSaveToNotebook={onSaveExerciseToNotebook} disabled={status !== "ready"} />}
-                  {messageExplanation && <ExplanationCard explanation={messageExplanation} onDiscuss={onDiscussExplanation} onSaveToLibrary={onSaveExplanationToLibrary} onSaveToNotebook={onSaveExplanationToNotebook} disabled={status !== "ready"} />}
+                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} disabled={status !== "ready"} />}
+                  {messageExplanation && <ExplanationCard explanation={messageExplanation} onDiscuss={onDiscussExplanation} onSaveToLibrary={onSaveExplanationToLibrary} disabled={status !== "ready"} />}
+                  {canCapture && <Button type="button" variant="ghost" size="sm" className="self-start text-muted-foreground"
+                    onPointerDown={() => { captureSelection.current = selectedText() }}
+                    onClick={(event) => {
+                      onCaptureResponse({ messageId: message.id, title: messageExplanation?.sections?.[0]?.heading ||
+                        (messageCorrection ? "Exercise feedback" : sessionTitle), selection: (event.detail ? captureSelection.current : "") || selectedText() })
+                      captureSelection.current = ""
+                    }}><NotebookPen />Save to Notebook</Button>}
                 </div>
               )
             }}
@@ -246,7 +283,7 @@ export function ChatPanel({
       {/* Error retry bar */}
       {status === "error" && error && (
         <div className="flex items-center justify-center gap-3 border-t border-destructive/20 bg-destructive/5 px-4 py-2.5">
-          <p className="text-xs text-destructive">Something went wrong.</p>
+          <p role="alert" className="text-xs text-destructive">{error.message}</p>
           {onRetry && (
             <Button
               variant="outline"
@@ -261,12 +298,24 @@ export function ChatPanel({
         </div>
       )}
 
+      {(status === "submitted" || status === "streaming") && (
+        <div className="flex items-center justify-between gap-2 px-4 py-2">
+          <span role="status" className="text-xs text-muted-foreground">{progress || "Generating response…"}</span>
+          <Button type="button" variant="outline" size="sm" onClick={onStop}>Stop</Button>
+        </div>
+      )}
+      {status === "ready" && !messagesLoading && canRegenerate && onRetry && (
+        <div className="flex items-center justify-end gap-2 px-4 py-1">
+          {progress && <span role="status" className="text-xs text-muted-foreground">{progress}</span>}
+          <Button type="button" variant="ghost" size="sm" onClick={onRetry}>{progress ? "Retry" : "Regenerate"}</Button>
+        </div>
+      )}
       {/* Input */}
       <ChatInput
         value={input}
         onChange={onInputChange}
         onSubmit={onSubmit}
-        isDisabled={status !== "ready" && status !== "error"}
+        isDisabled={messagesLoading || (status !== "ready" && status !== "error")}
         onAttach={onAttach}
       />
     </div>

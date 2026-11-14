@@ -18,7 +18,8 @@ def get_latest_exercise_for_owner(
         .order("created_at", desc=True)
         .limit(1).execute()
     )
-    return result.data[0] if result.data else None
+    row = result.data[0] if result.data else None
+    return row if row and not (row.get("exercise_data") or {}).get("for_exam") else None
 
 
 def get_exercise_for_owner(
@@ -32,11 +33,19 @@ def get_exercise_for_owner(
         .eq("user_id", user_id)
         .limit(1).execute()
     )
-    return result.data[0] if result.data else None
+    row = result.data[0] if result.data else None
+    return row if row and not (row.get("exercise_data") or {}).get("for_exam") else None
 
 
 def create_attempt(payload: dict[str, Any]) -> dict[str, Any]:
-    result = get_supabase().table("exercise_attempts").insert(payload).execute()
+    query = get_supabase().table("exercise_attempts")
+    request = payload.get("chat_request_id")
+    if request:
+        result = query.upsert(payload, on_conflict="session_id,chat_request_id", ignore_duplicates=True).execute()
+        if not result.data:
+            result = query.select("*").eq("session_id", payload["session_id"]).eq("chat_request_id", request).execute()
+    else:
+        result = query.insert(payload).execute()
     if not result.data:
         raise RuntimeError("Supabase did not return the saved exercise attempt")
     return result.data[0]

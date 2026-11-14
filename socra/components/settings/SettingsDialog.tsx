@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { Eye, EyeOff, Trash2, Info } from "lucide-react"
 import {
   Dialog,
@@ -54,16 +54,18 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
   } = useUserSettings()
 
   const [draftKeys, setDraftKeys] = useState<ApiKeys>({})
+  const [sourceSettings, setSourceSettings] = useState({ open: false, apiKeys, modelPref })
   const [draftModel, setDraftModel] = useState<ModelPref | null>(null)
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({})
 
-  useEffect(() => {
+  if (open !== sourceSettings.open || apiKeys !== sourceSettings.apiKeys || modelPref !== sourceSettings.modelPref) {
+    setSourceSettings({ open, apiKeys, modelPref })
     if (open) {
       setDraftKeys({ ...apiKeys })
-      setDraftModel(modelPref ? { ...modelPref } : null)
+      setDraftModel(modelPref)
       setVisibleKeys({})
     }
-  }, [open, apiKeys, modelPref])
+  }
 
   const hasAnyKey = Object.values(draftKeys).some((k) => k && k.trim().length > 0)
 
@@ -73,14 +75,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
       setApiKey(provider.id, key)
     }
 
-    if (draftModel) {
-      const keyForSelected = draftKeys[draftModel.provider]?.trim()
-      if (keyForSelected) {
-        setModelPref(draftModel)
-      } else {
-        setModelPref(draftModel)
-      }
-    }
+    if (draftModel) setModelPref(draftModel)
 
     if (hasAnyKey) {
       setQuotaExceeded(false)
@@ -108,11 +103,7 @@ export function SettingsDialog({ open, onOpenChange, onSaved }: SettingsDialogPr
 
   const handleModelSelect = (value: string) => {
     const [provider, ...modelParts] = value.split(":")
-    const selectedModel = modelParts.join(":")
-    const model = provider === "google" && selectedModel.startsWith("gemini-2.5-")
-      ? "gemini-3.5-flash-lite"
-      : selectedModel
-    setDraftModel({ provider: provider as Provider, model })
+    setDraftModel({ provider: provider as Provider, model: modelParts.join(":") })
   }
 
   const currentModelValue = draftModel

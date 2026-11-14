@@ -21,8 +21,24 @@ def save_message(
         "content": content,
         "metadata": metadata or {},
     }
-    res = get_supabase().table("messages").insert(payload).execute()
+    request = payload["metadata"].get("request_id")
+    if request:
+        payload["chat_request_id"] = request
+        res = get_supabase().table("messages").upsert(
+            payload, on_conflict="session_id,role,chat_request_id", ignore_duplicates=True,
+        ).execute()
+        if not res.data:
+            return get_turn_message(session_id, role, request) or {}
+    else:
+        res = get_supabase().table("messages").insert(payload).execute()
     return res.data[0] if res.data else {}
+
+
+def get_turn_message(session_id: str, role: Role, request_id: str) -> dict[str, Any] | None:
+    rows = get_supabase().table("messages").select("id,content,metadata").eq(
+        "session_id", session_id,
+    ).eq("role", role).eq("chat_request_id", request_id).limit(1).execute().data
+    return rows[0] if rows else None
 
 
 def save_message_metadata(message_id: str, metadata: dict[str, Any]) -> None:
@@ -84,3 +100,9 @@ def set_default_session_title_from_prompt(session_id: str, prompt: str) -> None:
     get_supabase().table("sessions").update({"title": title}).eq(
         "id", session_id
     ).eq("title", "New Inquiry").execute()
+
+
+def load_study_turn(session_id: str, owner: str, request: str) -> dict[str, Any] | None:
+    return get_supabase().rpc("load_study_turn", {
+        "inquiry": session_id, "owner": owner, "request": request,
+    }).execute().data

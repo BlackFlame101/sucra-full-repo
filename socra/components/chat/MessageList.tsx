@@ -46,7 +46,7 @@ function TypingIndicator({ progress }: { progress?: string }) {
               <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.2s]" />
               <span className="h-1.5 w-1.5 rounded-full bg-secondary/60 animate-pulse [animation-delay:0.4s]" />
             </span>
-            <span className="text-xs text-muted-foreground">{progress || "Working…"}</span>
+            <span role="status" className="text-xs text-muted-foreground">{progress || "Working…"}</span>
             <span className="border-l border-border/60 pl-2 text-[11px] tabular-nums text-muted-foreground/80">{elapsedLabel}</span>
           </div>
         </div>
@@ -105,7 +105,7 @@ export function MessageList({ messages, isLoading, status, progress, renderAfter
   return (
     <div className="flex w-full min-w-0 max-w-full flex-col gap-6 overflow-x-hidden p-4 sm:p-6">
       {messages.map((message) => (
-        <div key={message.id} className="contents">
+        <div key={message.id} id={`message-${message.id}`} className="min-w-0 space-y-2">
           <Message
             message={message}
             isStreaming={

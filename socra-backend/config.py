@@ -2,13 +2,27 @@
 from __future__ import annotations
 
 import os
+import re
 from functools import lru_cache
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 load_dotenv()
+
+
+DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash-lite"
+_GOOGLE_MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_BLOCKED_GOOGLE_MODEL = re.compile(r"gemini-(?:2[.]5-flash(?:[-_].*)?|flash(?:-lite)?-latest)")
+
+
+def resolve_google_model(model: str | None) -> str:
+    """Use the pinned default for legacy Flash IDs and floating Flash aliases."""
+    model_id = (model or "").strip().lower().removeprefix("models/")
+    if not _GOOGLE_MODEL_ID.fullmatch(model_id) or _BLOCKED_GOOGLE_MODEL.fullmatch(model_id):
+        return DEFAULT_GOOGLE_MODEL
+    return model_id
 
 
 class Settings(BaseModel):
@@ -32,8 +46,16 @@ class Settings(BaseModel):
     # Model configuration.
     # The default can be overridden per request from the Settings dialog.
     chat_model: str = Field(
-        default_factory=lambda: os.environ.get("CHAT_MODEL", "gemini-3.5-flash-lite")
+        default_factory=lambda: os.environ.get("CHAT_MODEL", DEFAULT_GOOGLE_MODEL), validate_default=True
     )
+    groq_model: str = Field(default_factory=lambda: os.environ.get("GROQ_CHAT_MODEL", "openai/gpt-oss-120b"))
+    groq_backup_model: str = Field(default_factory=lambda: os.environ.get("GROQ_BACKUP_MODEL", ""))
+
+    @field_validator("chat_model")
+    @classmethod
+    def validate_chat_model(cls, model: str) -> str:
+        return resolve_google_model(model)
+
     # text-embedding-004 was retired April 2026. We use gemini-embedding-001
     # truncated to 768 dims (Matryoshka) so it lines up with the vector(768)
     # column in public.embeddings. Existing chunks need re-embedding to fully

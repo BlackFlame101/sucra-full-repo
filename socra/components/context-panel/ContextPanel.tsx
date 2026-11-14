@@ -1,26 +1,29 @@
 "use client"
 
+import { useState } from "react"
+import { toast } from "sonner"
+import { Button } from "@/components/ui/button"
+import type { ContextPanelReading } from "@/lib/socra-ws"
+import { requestPdfProcessing } from "@/lib/documents"
 import { KeyTerms } from "./KeyTerms"
 import { SuggestedReading } from "./SuggestedReading"
-
-interface Reading {
-  documentName: string
-  pageNumber: number
-  section: string
-  chapter?: string
-}
 
 export interface CourseContextMaterial {
   documentId: string
   filename: string
   status: string | null
+  indexStatus?: string
+  processing?: boolean
+  ocrRequired?: boolean
   summary: { title: string; summary: string; page_start: number; page_end: number } | null
   sections: Array<{ title: string; summary: string; pageStart: number; pageEnd: number }>
 }
 
 interface ContextPanelProps {
   keyTerms: string[]
-  suggestedReadings: Reading[]
+  suggestedReadings: ContextPanelReading[]
+  onOpenPage?: (id: string, page: number, name: string) => void
+  onProcessingChange?: () => void
   courseMaterials: CourseContextMaterial[]
   isLoading?: boolean
 }
@@ -30,7 +33,21 @@ export function ContextPanel({
   suggestedReadings,
   courseMaterials,
   isLoading,
+  onOpenPage,
+  onProcessingChange,
 }: ContextPanelProps) {
+  const [pendingDocument, setPendingDocument] = useState<string | null>(null)
+  async function retry(id: string, kind: "index" | "summary" | "ocr") {
+    setPendingDocument(id)
+    try {
+      await requestPdfProcessing(id, kind)
+      onProcessingChange?.()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not queue this PDF.")
+    } finally {
+      setPendingDocument(null)
+    }
+  }
   return (
     <div className="flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-border/40 bg-card/20">
       {/* Header */}
@@ -80,8 +97,25 @@ export function ContextPanel({
                       </>
                     ) : (
                       <p className="mt-2 text-xs text-muted-foreground">
-                        {material.status === "processing" ? "Course map is being prepared…" : "No course map yet. Delete and reupload this PDF from the course page to rebuild its page index and summary."}
+                        {material.indexStatus === "failed" ? "Indexing failed."
+                            : material.indexStatus && material.indexStatus !== "ready" ? "The PDF is being indexed."
+                            : material.processing || material.status === "processing" ? "Course Map is being prepared."
+                            : "Course Map unavailable."}
                       </p>
+                    )}
+                    {!material.processing && onProcessingChange && (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {material.ocrRequired && (
+                          <><p className="text-xs text-muted-foreground">OCR runs locally and may take a few minutes. Indexing uses embedding quota.</p>
+                          <Button size="sm" variant="outline" disabled={pendingDocument !== null} onClick={() => void retry(material.documentId, "ocr")}>Run OCR</Button></>
+                        )}
+                        {material.indexStatus === "ready" && (!material.summary || !material.sections.length) && (
+                          <Button size="sm" variant="outline" disabled={pendingDocument !== null} onClick={() => void retry(material.documentId, "summary")}>Retry Course Map</Button>
+                        )}
+                        {(material.indexStatus === "ready" || (material.indexStatus === "failed" && !material.ocrRequired)) && (
+                          <Button size="sm" variant="ghost" disabled={pendingDocument !== null} onClick={() => void retry(material.documentId, "index")}>Rebuild index</Button>
+                        )}
+                      </div>
                     )}
                   </article>
                 ))}
@@ -89,7 +123,7 @@ export function ContextPanel({
             )}
           </section>
           <KeyTerms terms={keyTerms} isLoading={isLoading} />
-          <SuggestedReading readings={suggestedReadings} isLoading={isLoading} />
+          <SuggestedReading readings={suggestedReadings} isLoading={isLoading} onOpenPage={onOpenPage} />
         </div>
       </div>
     </div>

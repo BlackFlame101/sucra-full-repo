@@ -29,7 +29,7 @@ export function ModernScholar() {
                 <div className="relative">
                   <div className="absolute -left-4 top-0 bottom-0 w-1 bg-tertiary" />
                   <blockquote className="font-serif text-xl md:text-2xl italic leading-relaxed">
-                    "Education is the kindling of a flame, not the filling of a vessel."
+                    &quot;Education is the kindling of a flame, not the filling of a vessel.&quot;
                   </blockquote>
                   <cite className="mt-4 block text-sm text-muted-foreground not-italic">
                     — SOCRATES

@@ -15,27 +15,21 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   }
 
-  // Verify course ownership
-  const { data: course } = await supabase
+  // Read the owned course and its documents together. An empty course still exists.
+  const { data: course, error } = await supabase
     .from("courses")
-    .select("id")
+    .select("documents(*)")
     .eq("id", courseId)
     .eq("user_id", user.id)
-    .single()
-
-  if (!course) {
-    return NextResponse.json({ error: "Course not found" }, { status: 404 })
-  }
-
-  const { data: documents, error } = await supabase
-    .from("documents")
-    .select("*")
-    .eq("course_id", courseId)
-    .order("created_at", { ascending: false })
+    .order("created_at", { referencedTable: "documents", ascending: false })
+    .maybeSingle()
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 })
   }
+  if (!course) {
+    return NextResponse.json({ error: "Course not found" }, { status: 404 })
+  }
 
-  return NextResponse.json(documents)
+  return NextResponse.json(course.documents)
 }

@@ -1,16 +1,18 @@
 "use client"
 
-import { useEffect, useState, useCallback, useMemo, lazy, Suspense } from "react"
+import { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from "react"
 import { useParams, useRouter, useSearchParams } from "next/navigation"
 import { Menu, TriangleAlert, Settings } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Sidebar } from "@/components/layout/Sidebar"
 import { SettingsDialog } from "@/components/settings/SettingsDialog"
+import { pdfPageUrl } from "@/components/documents/PdfCitation"
 import { UploadModal } from "@/components/documents/UploadModal"
+import { SaveResponseDialog, type CaptureTarget } from "@/components/notebook/SaveResponseDialog"
 import { useSocraChat } from "@/hooks/useSocraChat"
+import { usePdfPolling } from "@/hooks/usePdfPolling"
 import { useUserSettings } from "@/hooks/useUserSettings"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   adaptSuggestedReadings,
   type ContextPanelReading,
@@ -18,29 +20,10 @@ import {
 } from "@/lib/socra-ws"
 import type { CourseContextMaterial } from "@/components/context-panel/ContextPanel"
 import { toast } from "sonner"
-import type { Course, Document, Session } from "@/types"
+import type { Course, Session } from "@/types"
 import type { UIMessage } from "ai"
 import type { LearningMode, PublicCorrection, PublicExercise, PublicSolution } from "@/lib/socra-ws"
 import type { PublicExplanation } from "@/lib/socra-ws"
-
-function explanationNoteText(explanation: PublicExplanation): string {
-  const lines = [`# ${explanation.definition}`, "", explanation.intuition, ""]
-  for (const section of explanation.sections ?? []) {
-    lines.push(`## ${section.heading}`, section.content)
-    if (section.code) lines.push(`\n\`\`\`${section.code_language || ""}\n${section.code}\n\`\`\``)
-    for (const item of section.walkthrough ?? []) lines.push(`\n\`\`\`\n${item.code}\n\`\`\`\n${item.explanation}`)
-    lines.push("")
-  }
-  if (explanation.course_example) lines.push("## Course example", explanation.course_example, "")
-  return lines.join("\n")
-}
-
-function exerciseNoteText(correction: PublicCorrection, solution: PublicSolution): string {
-  const lines = ["# Suggested answer", solution.expected_answer, "", "## Feedback", correction.overall_feedback]
-  for (const criterion of correction.criterion_feedback) lines.push(`\n### ${criterion.criterion} (${criterion.awarded_points}/${criterion.possible_points})`, criterion.feedback)
-  if (solution.common_mistakes.length) lines.push("\n## Common pitfalls", ...solution.common_mistakes.map((mistake) => `- ${mistake}`))
-  return lines.join("\n")
-}
 
 const ChatPanel = lazy(() =>
   import("@/components/chat/ChatPanel").then((m) => ({ default: m.ChatPanel }))
@@ -51,7 +34,7 @@ const ContextPanel = lazy(() =>
 
 function ChatPanelFallback() {
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-border/40 px-6 py-3">
         <Skeleton className="h-6 w-64" />
       </div>
@@ -97,10 +80,10 @@ export default function InquiryPage() {
   const params = useParams<{ courseId: string; sessionId: string }>()
   const router = useRouter()
   const searchParams = useSearchParams()
+  const notebookId = searchParams.get("note")
   const { courseId, sessionId } = params
 
   const [course, setCourse] = useState<Course | null>(null)
-  const [documents, setDocuments] = useState<Document[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
   const [sessionTitle, setSessionTitle] = useState("New Inquiry")
   const [sessionSavedToLibrary, setSessionSavedToLibrary] = useState(false)
@@ -109,6 +92,10 @@ export default function InquiryPage() {
   const [messagesLoading, setMessagesLoading] = useState(true)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
+  const sidebarToggle = useRef<HTMLButtonElement>(null)
+  const contextToggle = useRef<HTMLButtonElement>(null)
+  const contextClose = useRef<HTMLButtonElement>(null)
+  const [sourcePage, setSourcePage] = useState<{ id: string; page: number; name: string } | null>(null)
   const [learningMode, setLearningMode] = useState<LearningMode>(() =>
     searchParams.get("mode") === "exercise" ? "exercise" : searchParams.get("mode") === "explain" ? "explain" : "socratic"
   )
@@ -142,6 +129,24 @@ export default function InquiryPage() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [capture, setCapture] = useState<CaptureTarget | null>(null)
+
+  const materialRequest = useRef(0)
+  const refreshMaterials = useCallback(async (signal?: AbortSignal) => {
+    const request = ++materialRequest.current
+    try {
+      const response = await fetch(`/api/documents/${courseId}/context`, { signal })
+      if (response.ok) {
+        const materials: CourseContextMaterial[] = await response.json()
+        if (signal?.aborted || request !== materialRequest.current) return
+        setCourseMaterials(materials)
+        return materials.some((material) => material.processing)
+      }
+      if (response.status === 401 || response.status === 403 || response.status === 404) return false
+    } catch { /* Keep the last successful snapshot. */ }
+  }, [courseId])
+
+  usePdfPolling(courseMaterials.some((material) => material.processing), refreshMaterials)
 
   const handleContext = useCallback((evaluation: EvaluationResult) => {
     setKeyTerms(evaluation.key_terms ?? [])
@@ -171,6 +176,7 @@ export default function InquiryPage() {
     setSolution(null)
     setKeyTerms([value.concept])
     setSuggestedReadings(value.citations.map((citation) => ({
+      documentId: citation.document_id,
       documentName: citation.filename,
       pageNumber: citation.page_number ?? 0,
       section: citation.excerpt || value.concept,
@@ -186,6 +192,7 @@ export default function InquiryPage() {
     setSolution(null)
     setKeyTerms(value.sections?.map((section) => section.heading).filter(Boolean).slice(0, 8) ?? [])
     setSuggestedReadings(value.citations.map((citation) => ({
+      documentId: citation.document_id,
       documentName: citation.filename,
       pageNumber: citation.page_number ?? 0,
       section: citation.excerpt || value.definition,
@@ -196,6 +203,7 @@ export default function InquiryPage() {
     setCorrection(value)
     setKeyTerms(value.criterion_feedback.map((criterion) => criterion.criterion).slice(0, 8))
     setSuggestedReadings(value.citations.map((citation) => ({
+      documentId: citation.document_id,
       documentName: citation.filename,
       pageNumber: citation.page_number ?? 0,
       section: citation.excerpt || "Exercise feedback source",
@@ -219,9 +227,10 @@ export default function InquiryPage() {
     [activeConfig.apiKey, activeConfig.provider, activeConfig.model]
   )
 
-  const { messages, status, progress, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate } = useSocraChat({
+  const { messages, status, progress, connection, stop, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate, canRegenerate } = useSocraChat({
     sessionId,
     courseId,
+    recoverInterrupted: !messagesLoading,
     language,
     llmConfig,
     onContext: handleContext,
@@ -249,15 +258,14 @@ export default function InquiryPage() {
     }
   }, [status, messages])
 
-  // Fetch course, documents, and sessions
+  // Fetch course, materials, and sessions.
   useEffect(() => {
+    const controller = new AbortController()
     async function fetchData() {
       try {
-        const [coursesRes, docsRes, sessionsRes, contextRes] = await Promise.all([
-          fetch("/api/courses"),
-          fetch(`/api/documents/${courseId}`),
-          fetch(`/api/sessions/${courseId}`),
-          fetch(`/api/documents/${courseId}/context`),
+        const [coursesRes, sessionsRes] = await Promise.all([
+          fetch(`/api/courses?course=${encodeURIComponent(courseId)}`, { signal: controller.signal }),
+          fetch(`/api/sessions/${courseId}`, { signal: controller.signal }),
         ])
 
         if (coursesRes.ok) {
@@ -270,15 +278,15 @@ export default function InquiryPage() {
           }
         }
 
-        if (docsRes.ok) setDocuments(await docsRes.json())
         if (sessionsRes.ok) setSessions(await sessionsRes.json())
-        if (contextRes.ok) setCourseMaterials(await contextRes.json())
       } catch {
-        toast.error("Failed to load course data")
+        if (!controller.signal.aborted) toast.error("Failed to load course data")
       }
     }
-    fetchData()
-  }, [courseId, router])
+    void fetchData()
+    void refreshMaterials(controller.signal)
+    return () => controller.abort()
+  }, [courseId, refreshMaterials, router])
 
   // Load existing messages for this session
   useEffect(() => {
@@ -291,6 +299,8 @@ export default function InquiryPage() {
       setCorrection(null)
       setSolution(null)
       setExplanation(null)
+      setKeyTerms([])
+      setSuggestedReadings([])
       const queryMode = new URLSearchParams(window.location.search).get("mode")
       const savedMode = window.localStorage.getItem(storedModeKey(sessionId))
       setLearningMode(isLearningMode(queryMode) ? queryMode : isLearningMode(savedMode) ? savedMode : "socratic")
@@ -304,7 +314,7 @@ export default function InquiryPage() {
                 id: m.id,
                 role: m.role as "user" | "assistant",
                 parts: [{ type: "text" as const, text: visibleMessageText(m.role, m.content) }],
-                metadata: m.metadata ?? {},
+                metadata: { ...m.metadata, persisted: m.role === "assistant" },
               })
             )
             setMessages(restored)
@@ -315,6 +325,13 @@ export default function InquiryPage() {
               (m: { role: string; metadata?: Record<string, unknown> }) =>
                 m.role === "assistant" && m.metadata?.[key]
             )?.metadata?.[key]
+            const context = latestAssistantMetadata("course_context") as EvaluationResult | undefined
+            if (context) handleContext(context)
+            else {
+              void fetch(`/api/sessions/${sessionId}/study-context`).then((response) => response.ok ? response.json() : null)
+                .then((value) => { if (!cancelled && value) setKeyTerms((current) => current.length ? current : value.key_terms) })
+                .catch(() => {})
+            }
             const restoredExercise = latestAssistantMetadata("exercise")
             const restoredExplanation = latestAssistantMetadata("explanation")
             const restoredCorrection = latestAssistantMetadata("correction")
@@ -340,7 +357,7 @@ export default function InquiryPage() {
             if (restoredExplanation) setExplanation(restoredExplanation as PublicExplanation)
             if (restoredCorrection) setCorrection(restoredCorrection as PublicCorrection)
             if (restoredSolution) setSolution(restoredSolution as PublicSolution)
-          } else {
+          } else if (!notebookId) {
             // Brand new session — push the user back through the diagnostic.
             router.replace(
               `/dashboard/course/${courseId}/inquiry/${sessionId}/diagnostic`
@@ -368,7 +385,7 @@ export default function InquiryPage() {
     return () => {
       cancelled = true
     }
-  }, [sessionId, courseId, setMessages, router])
+  }, [sessionId, courseId, setMessages, router, handleContext, notebookId])
 
   const handleSendMessage = () => {
     if (!input.trim()) return
@@ -379,7 +396,7 @@ export default function InquiryPage() {
       setCorrection(null)
       setSolution(null)
     }
-    sendMessage({ text, mode: learningMode })
+    sendMessage({ text, mode: learningMode, ...(notebookId ? { notebook: { id: notebookId, action: learningMode === "exercise" ? "quiz" : "ask" } as const } : {}) })
   }
 
   const handleLanguageChange = async (nextLanguage: "fr" | "en") => {
@@ -400,7 +417,7 @@ export default function InquiryPage() {
     if (!exercise || status !== "ready") return
     setLearningMode("exercise")
     window.localStorage.setItem(storedModeKey(sessionId), "exercise")
-    router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=exercise`)
+    replaceInquiryMode("exercise")
     setExercise(null)
     setCorrection(null)
     setSolution(null)
@@ -408,6 +425,7 @@ export default function InquiryPage() {
       text: "Generate another question. Keep the scope of my most recent specific request for exercise questions, if any; do not infer a narrower scope from the previous exercise's generated concept. Avoid repeating recent questions.",
       displayText: "Generate another question",
       mode: "exercise",
+      ...(notebookId ? { notebook: { id: notebookId, action: "quiz" } as const } : {}),
     })
   }
 
@@ -421,19 +439,26 @@ export default function InquiryPage() {
     revealSolution(exercise.id)
   }
 
+  function replaceInquiryMode(mode: LearningMode) {
+    const path = `/dashboard/course/${courseId}/inquiry/${sessionId}`
+    const query = new URLSearchParams()
+    if (notebookId) query.set("note", notebookId)
+    if (mode !== "socratic") query.set("mode", mode)
+    router.replace(query.size ? `${path}?${query}` : path)
+  }
+
   const handleLearningModeChange = (mode: LearningMode) => {
     setLearningMode(mode)
     window.localStorage.setItem(storedModeKey(sessionId), mode)
-    const path = `/dashboard/course/${courseId}/inquiry/${sessionId}`
-    router.replace(mode === "socratic" ? path : `${path}?mode=${mode}`)
+    replaceInquiryMode(mode)
   }
 
   const handleDiscussExplanation = (question: string) => {
     setLearningMode("socratic")
     window.localStorage.setItem(storedModeKey(sessionId), "socratic")
-    router.replace(`/dashboard/course/${courseId}/inquiry/${sessionId}`)
+    replaceInquiryMode("socratic")
     setInput("")
-    sendMessage({ text: question, mode: "socratic" })
+    sendMessage({ text: question, mode: "socratic", ...(notebookId ? { notebook: { id: notebookId, action: "ask" } as const } : {}) })
   }
 
   const saveLibraryItem = async (itemType: "explanation" | "exercise", title: string, content: Record<string, unknown>, sourceDocumentId?: string, sourcePage?: number) => {
@@ -466,35 +491,21 @@ export default function InquiryPage() {
     }
   }
 
-  const saveNotebookNote = async (title: string, content: string, sourceType: "explanation" | "exercise", sourceData: Record<string, unknown>, sourceDocumentId?: string, sourcePage?: number) => {
-    const response = await fetch("/api/notebook", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, content, source_type: sourceType, source_data: { ...sourceData, session_id: sessionId }, course_id: courseId, source_document_id: sourceDocumentId, source_page: sourcePage }),
-    })
-    const payload = await response.json()
-    if (!response.ok) { toast.error("Could not add to Notebook", { description: payload.error }); return }
-    toast.success("Added to Notebook")
-  }
+  const messageIdForExplanation = (value: PublicExplanation) => [...messages].reverse().find((message) => {
+    const metadata = message.metadata as { explanation?: PublicExplanation } | undefined
+    return message.role === "assistant" && metadata?.explanation === value
+  })?.id
 
   const handleSaveExplanationToLibrary = (value: PublicExplanation) => {
     const source = value.citations[0]
-    void saveLibraryItem("explanation", value.sections?.[0]?.heading || value.definition.slice(0, 90), { explanation: value }, source?.document_id, source?.page_number ?? undefined)
-  }
-
-  const handleSaveExplanationToNotebook = (value: PublicExplanation) => {
-    const source = value.citations[0]
-    void saveNotebookNote(value.sections?.[0]?.heading || "Course explanation", explanationNoteText(value), "explanation", { explanation: value }, source?.document_id, source?.page_number ?? undefined)
+    const messageId = messageIdForExplanation(value)
+    if (!messageId) { toast.error("Wait for the explanation to finish saving."); return }
+    void saveLibraryItem("explanation", value.sections?.[0]?.heading || value.definition.slice(0, 90), { explanation: value, message_id: messageId }, source?.document_id, source?.page_number ?? undefined)
   }
 
   const handleSaveExerciseToLibrary = (value: PublicCorrection, answer: PublicSolution) => {
     const source = value.citations[0]
     void saveLibraryItem("exercise", `Solved exercise ${answer.exercise_id.slice(0, 8)}`, { correction: value, solution: answer }, source?.document_id, source?.page_number ?? undefined)
-  }
-
-  const handleSaveExerciseToNotebook = (value: PublicCorrection, answer: PublicSolution) => {
-    const source = value.citations[0]
-    void saveNotebookNote(`Solved exercise ${answer.exercise_id.slice(0, 8)}`, exerciseNoteText(value, answer), "exercise", { correction: value, solution: answer }, source?.document_id, source?.page_number ?? undefined)
   }
 
   const handleNewInquiry = async () => {
@@ -534,39 +545,49 @@ export default function InquiryPage() {
     }
   }
 
-  const refreshDocuments = async () => {
-    try {
-      const [res, contextRes] = await Promise.all([
-        fetch(`/api/documents/${courseId}`),
-        fetch(`/api/documents/${courseId}/context`),
-      ])
-      if (res.ok) setDocuments(await res.json())
-      if (contextRes.ok) setCourseMaterials(await contextRes.json())
-    } catch { /* non-critical */ }
+  const closeContext = () => {
+    setContextOpen(false)
+    contextToggle.current?.focus()
   }
 
+  const closeSidebar = () => {
+    setSidebarOpen(false)
+    sidebarToggle.current?.focus()
+  }
+
+  const refreshDocuments = () => { void refreshMaterials() }
+
   return (
-    <div className="flex h-[calc(100vh-3.5rem)] overflow-hidden">
+    <div className="relative isolate flex h-full min-h-0 overflow-hidden" onKeyDown={(event) => {
+      if (event.key === "Escape") {
+        if (contextOpen) closeContext()
+        else if (sidebarOpen) closeSidebar()
+      }
+    }}>
       {/* Mobile sidebar toggle */}
       <Button
         variant="ghost"
         size="icon"
-        className="fixed bottom-4 left-4 z-50 lg:hidden h-10 w-10 rounded-full bg-card border border-border/50 shadow-lg"
-        onClick={() => setSidebarOpen(!sidebarOpen)}
+        ref={sidebarToggle}
+        aria-label="Toggle course navigation"
+        aria-expanded={sidebarOpen}
+        aria-controls="inquiry-sidebar"
+        className="absolute bottom-4 left-4 z-50 lg:hidden h-10 w-10 rounded-full bg-card border border-border/50 shadow-lg"
+        onClick={() => { if (sidebarOpen) closeSidebar(); else setSidebarOpen(true) }}
       >
         <Menu className="h-4 w-4" />
       </Button>
 
       {/* Left Sidebar */}
-      <aside
+      <aside id="inquiry-sidebar" aria-label="Course navigation"
         className={`${
-          sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        } fixed inset-y-14 left-0 z-40 w-64 transition-transform duration-200 lg:relative lg:inset-y-0 lg:translate-x-0 lg:w-64 shrink-0`}
+          sidebarOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"
+        } absolute inset-y-0 left-0 z-40 w-64 transition-transform duration-200 lg:relative lg:translate-x-0 shrink-0`}
       >
         <Sidebar
           courseName={course?.name || "Loading..."}
           courseId={courseId}
-          documents={documents}
+          documents={courseMaterials.map(({ documentId, filename }) => ({ id: documentId, filename }))}
           sessions={sessions}
           currentSessionId={sessionId}
           onNewInquiry={handleNewInquiry}
@@ -578,15 +599,15 @@ export default function InquiryPage() {
       {/* Sidebar overlay on mobile */}
       {sidebarOpen && (
         <div
-          className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm lg:hidden"
-          onClick={() => setSidebarOpen(false)}
+          className="absolute inset-0 z-30 bg-background/80 backdrop-blur-sm lg:hidden"
+          onClick={closeSidebar}
         />
       )}
 
       {/* Center Chat Panel */}
-      <main className="min-w-0 flex-1 overflow-hidden">
+      <section aria-label="Inquiry chat" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {apiKeyIssue && (
-          <div role="alert" className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground sm:mx-6">
+          <div role="alert" className="mx-4 mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground sm:mx-6">
             <div className="flex items-start gap-3">
               <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
               <div><p className="font-semibold">{apiKeyIssue.code === "API_KEY_QUOTA_EXCEEDED" ? "AI API key usage limit reached" : apiKeyIssue.code === "API_KEY_INVALID" ? "AI API key was rejected" : apiKeyIssue.code === "API_RATE_LIMITED" ? "AI provider is rate-limiting requests" : "AI API key access problem"}</p><p className="mt-1 text-muted-foreground">{apiKeyIssue.message}</p></div>
@@ -603,13 +624,23 @@ export default function InquiryPage() {
             input={input}
             status={status}
             progress={progress}
+            connection={connection}
+            onStop={stop}
             contextOpen={contextOpen}
-            onToggleContext={() => setContextOpen((open) => !open)}
+            contextToggleRef={contextToggle}
+            onToggleContext={() => {
+              if (contextOpen) closeContext()
+              else {
+                setContextOpen(true)
+                requestAnimationFrame(() => contextClose.current?.focus())
+              }
+            }}
             messagesLoading={messagesLoading}
             error={error}
             onInputChange={setInput}
             onSubmit={handleSendMessage}
             onRetry={regenerate}
+            canRegenerate={canRegenerate}
             onAttach={() => setUploadOpen(true)}
             learningMode={learningMode}
             onLearningModeChange={handleLearningModeChange}
@@ -622,39 +653,50 @@ export default function InquiryPage() {
             explanation={explanation}
             onDiscussExplanation={handleDiscussExplanation}
             onSaveExplanationToLibrary={handleSaveExplanationToLibrary}
-            onSaveExplanationToNotebook={handleSaveExplanationToNotebook}
+            onCaptureResponse={setCapture}
+            sourceMessageId={searchParams.get("message")}
             onSaveExerciseToLibrary={handleSaveExerciseToLibrary}
-            onSaveExerciseToNotebook={handleSaveExerciseToNotebook}
             onSaveSessionToLibrary={() => void saveInquiryToLibrary()}
             sessionSavedToLibrary={sessionSavedToLibrary}
             savingSessionToLibrary={savingSessionToLibrary}
           />
         </Suspense>
-      </main>
+      </section>
 
       {/* Right Context Panel */}
-      <aside
+      <aside id="inquiry-context" aria-label="Course context" inert={!contextOpen}
         className={`${
-          contextOpen ? "translate-x-0 xl:w-72 xl:border-l" : "translate-x-full xl:translate-x-0 xl:w-0 xl:border-l-0"
-        } fixed inset-y-14 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden border-border/40 transition-[transform,width] duration-200 xl:relative xl:inset-y-0 xl:shrink-0`}
+          contextOpen ? (sourcePage ? "translate-x-0 xl:w-[min(40vw,44rem)] xl:border-l" : "translate-x-0 xl:w-72 xl:border-l") : "translate-x-full xl:translate-x-0 xl:w-0 xl:border-l-0"
+        } absolute inset-y-0 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden border-border/40 transition-[transform,width] duration-200 xl:relative xl:shrink-0`}
       >
-        <div className="h-full w-72 overflow-hidden">
-          <Suspense fallback={<ContextPanelFallback />}>
+        <div className={`relative h-full overflow-hidden ${sourcePage ? "w-full" : "w-72"}`}>
+          <Button ref={contextClose} size="sm" variant="ghost" onClick={closeContext}
+            className="absolute right-2 top-1 z-10 xl:sr-only xl:focus:not-sr-only" aria-label="Close course context">Close</Button>
+          {sourcePage ? <div className="flex h-full flex-col border-l border-border">
+            <div className="flex items-center justify-between gap-2 border-b p-3">
+              <Button size="sm" variant="outline" onClick={() => setSourcePage(null)}>Back to context</Button>
+              <a href={pdfPageUrl(sourcePage.id, sourcePage.page)} target="_blank" rel="noopener noreferrer" className="mr-12 text-sm text-secondary underline xl:mr-0">Open PDF</a>
+            </div>
+            <iframe key={`${sourcePage.id}:${sourcePage.page}`} title={`${sourcePage.name}, page ${sourcePage.page}`}
+              className="min-h-0 flex-1 bg-card" src={pdfPageUrl(sourcePage.id, sourcePage.page)} referrerPolicy="no-referrer" />
+          </div> : <Suspense fallback={<ContextPanelFallback />}>
             <ContextPanel
               keyTerms={keyTerms}
               suggestedReadings={suggestedReadings}
               courseMaterials={courseMaterials}
               isLoading={contextLoading}
+              onOpenPage={(id, page, name) => setSourcePage({ id, page, name })}
+              onProcessingChange={refreshDocuments}
             />
-          </Suspense>
+          </Suspense>}
         </div>
       </aside>
 
       {/* Context panel overlay on mobile */}
       {contextOpen && (
         <div
-          className="fixed inset-0 z-30 bg-background/80 backdrop-blur-sm xl:hidden"
-          onClick={() => setContextOpen(false)}
+          className="absolute inset-0 z-30 bg-background/80 backdrop-blur-sm xl:hidden"
+          onClick={closeContext}
         />
       )}
 
@@ -665,6 +707,11 @@ export default function InquiryPage() {
         onUploadComplete={refreshDocuments}
       />
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSaved={() => setApiKeyIssue(null)} />
+      {capture && <SaveResponseDialog target={capture} courseId={courseId} sessionId={sessionId}
+        onClose={() => setCapture(null)} onSaved={(id) => {
+          setCapture(null)
+          toast.success("Saved to Notebook", { action: { label: "Open note", onClick: () => router.push(`/dashboard/notebook?note=${id}`) } })
+        }} />}
     </div>
   )
 }

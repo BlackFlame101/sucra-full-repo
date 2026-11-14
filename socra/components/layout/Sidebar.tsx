@@ -18,7 +18,7 @@ import type { CourseSession, Document } from "@/types"
 interface SidebarProps {
   courseName: string
   courseId: string
-  documents: Document[]
+  documents: Pick<Document, "id" | "filename">[]
   sessions: CourseSession[]
   currentSessionId?: string
   onNewInquiry: () => void
@@ -107,7 +107,7 @@ export function Sidebar({
         </Button>
       </div>
 
-      <div className="min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-4">
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4">
         {/* Resources Section */}
         <div className="py-3">
           <h3 className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-2">

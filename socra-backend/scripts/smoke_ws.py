@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,8 +25,8 @@ import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-SESSION_ID = "5fb1fc22-ca22-42f3-8a9b-ffac78705509"  # fresh session, no prior history
-COURSE_ID = "a5159856-5479-4699-9f1b-b76ae04fb818"
+SESSION_ID = os.environ.get("SOCRA_TEST_SESSION_ID", "")
+COURSE_ID = os.environ.get("SOCRA_TEST_COURSE_ID", "")
 WS_URL = f"ws://127.0.0.1:8000/ws/chat/{SESSION_ID}"
 
 TURN_1 = "I want to understand star schemas in data warehousing."
@@ -80,9 +81,16 @@ async def _drain_until_done(ws) -> dict:
 
 async def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    print(f"Connecting to {WS_URL} ...")
+    token = os.environ.get("SOCRA_TEST_ACCESS_TOKEN")
+    if not (token and SESSION_ID and COURSE_ID):
+        raise SystemExit("Set SOCRA_TEST_ACCESS_TOKEN, SOCRA_TEST_SESSION_ID and SOCRA_TEST_COURSE_ID for a local test course.")
+    print("Connecting to the local tutor …")
     async with websockets.connect(WS_URL, max_size=2**24) as ws:
-        print("Connected.\n")
+        await ws.send(json.dumps({"action": "authenticate", "courseId": COURSE_ID, "accessToken": token}))
+        first = json.loads(await asyncio.wait_for(ws.recv(), timeout=30))
+        if first.get("type") != "connected":
+            raise SystemExit("Local authentication failed.")
+        print("Connected.")
 
         # ---------------- TURN 1 ----------------
         print("=" * 70)

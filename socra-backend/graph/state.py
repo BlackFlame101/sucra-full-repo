@@ -6,7 +6,7 @@ node reads from the state and writes back into it in a controlled fashion.
 """
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Awaitable, Callable, Literal, TypedDict
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +93,15 @@ class SocraState(TypedDict, total=False):
     user_id: str
     messages: list[ChatTurn]
     student_message: str
+    request_id: str
+    notebook_context: dict[str, Any]
+    notebook_action: str
+    notebook_result: str
+    preview: Callable[[str | None], Awaitable[None]]
+    tutor_delta: Callable[[str], Awaitable[None]]
+    emit_diagnostic: Callable[[DiagnosticReport], Awaitable[None]]
+    complete_socratic: Callable[[str], Awaitable[None]]
+    progress: Callable[[str], Awaitable[None]]
 
     # Optional per-request LLM overrides (forwarded by the WS layer when the
     # student configured their own Gemini API key in the frontend Settings).
@@ -101,6 +110,10 @@ class SocraState(TypedDict, total=False):
     provider: str
     language: str
     mode: Literal["socratic", "exercise", "explain", "correct"]
+    for_exam: bool
+    course_search_query: str
+    requested_exercise_type: str
+    model_request_id: str
     requested_difficulty: Literal["beginner", "intermediate", "advanced"]
     exercise_record: dict[str, Any]
     student_answer: str
@@ -128,3 +141,16 @@ class SocraState(TypedDict, total=False):
     # Errors ----------------------------------------------------------------
     error: str
     agent_issues: list[dict[str, str]]
+
+
+def bounded_history(history: list[ChatTurn], *, max_chars: int, max_messages: int = 24) -> list[ChatTurn]:
+    """Preserve the latest turn, then add as many preceding messages as fit."""
+    selected: list[ChatTurn] = []
+    used = 0
+    for turn in reversed(history[-max_messages:]):
+        size = len(turn["content"])
+        if selected and used + size > max_chars:
+            break
+        selected.append(turn)
+        used += size
+    return list(reversed(selected))

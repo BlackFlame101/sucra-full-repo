@@ -12,6 +12,7 @@ from agents.exercise_generator import (
     _is_duplicate_question,
     _latest_exercise_scope,
     _requested_exercise_type,
+    _rank_code_chunks,
     _requested_option_count,
     _validate_type_specific,
     calculate_safe_expression,
@@ -86,6 +87,14 @@ class ExerciseFlowTests(unittest.TestCase):
         )
         _validate_type_specific(sql)
         self.assertEqual(sql.sql_expected_rows, [["Ada"]])
+
+    def test_code_examples_are_ranked_by_requested_identifier(self) -> None:
+        chunks = [
+            {"page_number": 1, "content": "def total(values):\n    return sum(values)"},
+            {"page_number": 2, "content": "The group_scores function is introduced later in the course."},
+            {"page_number": 12, "content": "def group_scores(rows):\n    return sorted(rows)"},
+        ]
+        self.assertEqual([chunk["page_number"] for chunk in _rank_code_chunks(chunks, "Python exercise on group_scores")], [12, 1])
 
     def test_repeat_check_rejects_lightly_reworded_question(self) -> None:
         previous = "Based on the provided CV, what is the name of the company where Badr-Eddine completed his internship from July 1 to August 31?"

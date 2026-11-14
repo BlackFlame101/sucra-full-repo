@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { DocumentList } from "@/components/documents/DocumentList"
 import { UploadModal } from "@/components/documents/UploadModal"
+import { usePdfPolling } from "@/hooks/usePdfPolling"
+import { isPdfProcessing } from "@/lib/documents"
 import { toast } from "sonner"
 import type { Course, CourseSession, Document } from "@/types"
 import Link from "next/link"
@@ -28,6 +30,7 @@ export default function CourseDetailPage() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState("")
   const editTitleRef = useRef<HTMLInputElement>(null)
+  const documentRequest = useRef(0)
 
   useEffect(() => {
     if (editingSessionId) {
@@ -36,22 +39,27 @@ export default function CourseDetailPage() {
     }
   }, [editingSessionId])
 
-  const fetchDocuments = useCallback(async () => {
-    setLoadingDocs(true)
+  const fetchDocuments = useCallback(async (background = false, signal?: AbortSignal) => {
+    const request = ++documentRequest.current
+    if (!background) setLoadingDocs(true)
     try {
-      const res = await fetch(`/api/documents/${courseId}`)
+      const res = await fetch(`/api/documents/${courseId}`, { signal })
       if (res.ok) {
-        const data = await res.json()
+        const data: Document[] = await res.json()
+        if (signal?.aborted || request !== documentRequest.current) return
         setDocuments(data)
+        return data.some(isPdfProcessing)
       }
+      if (res.status === 401 || res.status === 403 || res.status === 404) return false
     } catch {
-      toast.error("Failed to load documents")
+      if (!background && !signal?.aborted) toast.error("Failed to load documents")
     } finally {
-      setLoadingDocs(false)
+      if (!background && !signal?.aborted) setLoadingDocs(false)
     }
   }, [courseId])
 
   useEffect(() => {
+    const controller = new AbortController()
     async function fetchCourse() {
       try {
         const res = await fetch(`/api/courses`)
@@ -85,9 +93,14 @@ export default function CourseDetailPage() {
     }
 
     fetchCourse()
-    fetchDocuments()
+    void fetchDocuments(false, controller.signal)
     fetchSessions()
+    return () => controller.abort()
   }, [courseId, router, fetchDocuments])
+
+  const hasSearchablePdf = documents.some((document) => (document.index_status ?? "ready") === "ready")
+  const pollDocuments = useCallback((signal: AbortSignal) => fetchDocuments(true, signal), [fetchDocuments])
+  usePdfPolling(documents.some(isPdfProcessing), pollDocuments)
 
   const handleNewInquiry = async () => {
     setCreatingSession(true)
@@ -191,6 +204,7 @@ export default function CourseDetailPage() {
         method: "DELETE",
       })
       if (!res.ok) throw new Error()
+      documentRequest.current++
       setDocuments((prev) => prev.filter((d) => d.id !== id))
       toast.success("Document deleted", {
         description: doc
@@ -238,7 +252,7 @@ export default function CourseDetailPage() {
           <Button
             variant="outline"
             className="gap-2"
-            disabled={documents.length === 0 || creatingSession}
+            disabled={!hasSearchablePdf || creatingSession}
             onClick={handleNewExam}
           >
             <ClipboardCheck className="h-4 w-4" />
@@ -254,7 +268,7 @@ export default function CourseDetailPage() {
           </Button>
           <Button
             className="gap-2"
-            disabled={documents.length === 0 || creatingSession}
+            disabled={!hasSearchablePdf || creatingSession}
             onClick={handleNewInquiry}
           >
             <MessageSquare className="h-4 w-4" />
@@ -285,6 +299,7 @@ export default function CourseDetailPage() {
             documents={documents}
             loading={loadingDocs}
             onDelete={handleDeleteDocument}
+            onProcessingChange={() => { void fetchDocuments(true) }}
           />
         </div>
 

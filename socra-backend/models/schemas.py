@@ -70,7 +70,7 @@ class GeneratedExercise(BaseModel):
     difficulty: Literal["beginner", "intermediate", "advanced"]
     bloom_level: Literal["remember", "understand", "apply", "analyze", "evaluate", "create"]
     prompt: str = Field(min_length=20, max_length=2000)
-    citations: list[ExerciseCitation] = Field(min_length=1, max_length=3)
+    citations: list[ExerciseCitation] = Field(max_length=3)
     hints: list[str] = Field(min_length=2, max_length=3)
     expected_answer: str = Field(min_length=1, max_length=4000)
     rubric: list[ExerciseRubricCriterion] = Field(min_length=1, max_length=6)

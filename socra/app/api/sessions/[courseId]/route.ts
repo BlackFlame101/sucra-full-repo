@@ -36,7 +36,7 @@ export async function GET(
   const exams = Array.isArray(examPayload) ? examPayload as Array<{
     id: string
     session_id: string
-    status: "in_progress" | "completed"
+    status: "preparing" | "preparation_failed" | "in_progress" | "grading" | "grading_failed" | "completed"
   }> : []
   const examBySession = new Map(exams.map((exam) => [exam.session_id, exam]))
   return NextResponse.json((sessions ?? []).map((session) => {

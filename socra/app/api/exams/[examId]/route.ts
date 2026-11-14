@@ -5,7 +5,7 @@ export async function GET(
   { params }: { params: Promise<{ examId: string }> },
 ) {
   const { examId } = await params
-  return proxyExamRequest(`/exams/${encodeURIComponent(examId)}`, "GET")
+  return proxyExamRequest(`/exams/${encodeURIComponent(examId)}`, "GET", undefined, 15_000)
 }
 
 export async function POST(
@@ -14,5 +14,5 @@ export async function POST(
 ) {
   const { examId } = await params
   const body = await request.json().catch(() => ({}))
-  return proxyExamRequest(`/exams/${encodeURIComponent(examId)}/submit`, "POST", body)
+  return proxyExamRequest(`/exams/${encodeURIComponent(examId)}/submit`, "POST", body, 20_000)
 }

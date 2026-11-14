@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react"
 import type { Provider } from "@/lib/ai/model-resolver"
+import { resolveGoogleModel } from "@/lib/ai/model-policy"
 
 const KEYS_STORAGE_KEY = "socra_api_keys"
 const MODEL_STORAGE_KEY = "socra_model_pref"
@@ -18,6 +19,12 @@ export interface ApiKeys {
 export interface ModelPref {
   provider: Provider
   model: string
+}
+
+function normalizeModelPref(pref: ModelPref): ModelPref {
+  if (pref.provider !== "google") return pref
+  const model = resolveGoogleModel(pref.model)
+  return model === pref.model ? pref : { ...pref, model }
 }
 
 export function notifySettingsChanged() {
@@ -61,15 +68,9 @@ export function useUserSettings() {
         localStorage.setItem(KEYS_STORAGE_KEY, JSON.stringify(migratedKeys))
       }
       const savedModel = readJson<ModelPref | null>(MODEL_STORAGE_KEY, null)
-      // Move saved Gemini 2.5 preferences to the requested 3.5 model. The key is
-      // kept exactly as stored; users can replace it in Settings if it is stale.
-      const model = savedModel?.provider === "google" && savedModel.model.startsWith("gemini-2.5-")
-        ? { provider: "google" as const, model: "gemini-3.5-flash-lite" }
-        : savedModel
-      if (model && model !== savedModel) localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(model))
-      const migratedModel = model?.provider === ("xai" as Provider)
+      const migratedModel = savedModel?.provider === ("xai" as Provider)
         ? { provider: "groq" as Provider, model: "openai/gpt-oss-120b" }
-        : model
+        : savedModel && normalizeModelPref(savedModel)
       if (migratedModel !== savedModel) localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(migratedModel))
       setModelPrefState(migratedModel)
       setQuotaExceededState(localStorage.getItem(QUOTA_FLAG_KEY) === "true")
@@ -96,8 +97,9 @@ export function useUserSettings() {
   )
 
   const setModelPref = useCallback((pref: ModelPref) => {
-    setModelPrefState(pref)
-    localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(pref))
+    const normalized = normalizeModelPref(pref)
+    setModelPrefState(normalized)
+    localStorage.setItem(MODEL_STORAGE_KEY, JSON.stringify(normalized))
     notifySettingsChanged()
   }, [])
 

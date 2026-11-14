@@ -10,6 +10,7 @@ during the academic demo. (We can layer an LLM-narrated summary later.)
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Iterable
 
@@ -167,13 +168,13 @@ async def run_memoire(state: SocraState) -> SocraState:
         logger.warning("memoire: missing session_id/user_id, skipping persistence")
         return {**state, "current_node": "memoire"}
 
-    # Prefer the profile already in state (loaded once at WS connect time).
+    # The socket loads the profile while holding the inquiry lease.
     current_profile_dict = state.get("profile") or {}
     if not current_profile_dict:
         try:
-            current_profile_dict = profiles_db.get_profile(session_id) or {}
+            current_profile_dict = await asyncio.to_thread(profiles_db.get_profile, session_id) or {}
         except Exception as exc:  # pragma: no cover - defensive
-            logger.exception("memoire: failed to load profile: %s", exc)
+            logger.warning("profile_load_failed error_type=%s", type(exc).__name__)
             current_profile_dict = {}
 
     current_profile = _ensure_profile_shape(current_profile_dict, session_id, user_id)
@@ -187,8 +188,8 @@ async def run_memoire(state: SocraState) -> SocraState:
         updated_profile = _apply_evaluation(current_profile, evaluation, bloom_level=bloom_level)
 
     try:
-        profiles_db.upsert_profile(
-            session_id,
+        await asyncio.to_thread(
+            profiles_db.upsert_profile, session_id,
             user_id,
             mastered_concepts=updated_profile["mastered_concepts"],
             fragile_concepts=updated_profile["fragile_concepts"],
@@ -198,7 +199,7 @@ async def run_memoire(state: SocraState) -> SocraState:
             exercise_performance=updated_profile["exercise_performance"],
         )
     except Exception as exc:  # pragma: no cover - defensive
-        logger.exception("memoire: failed to persist profile: %s", exc)
+        logger.warning("profile_save_failed error_type=%s", type(exc).__name__)
 
     return {
         **state,

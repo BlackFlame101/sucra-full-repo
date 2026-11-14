@@ -3,7 +3,7 @@
 import Link from "next/link"
 import { useEffect, useState } from "react"
 import { ArrowLeft, ArrowRight, Bookmark, LoaderCircle } from "lucide-react"
-import { useParams } from "next/navigation"
+import { useParams, useRouter } from "next/navigation"
 import { ExerciseCard } from "@/components/chat/ExerciseCard"
 import { ExerciseFeedbackCard } from "@/components/chat/ExerciseFeedbackCard"
 import { ExplanationCard } from "@/components/chat/ExplanationCard"
@@ -31,7 +31,7 @@ type SavedLibraryItem = {
   created_at: string
   content: {
     snapshot?: { kind?: "inquiry" | "exam"; messages?: SavedMessage[]; exam?: SavedExam }
-    explanation?: { definition?: string; intuition?: string; sections?: Array<{ heading?: string; content?: string; code?: string }>; course_example?: string }
+    explanation?: PublicExplanation
     expected_answer?: string
     solution?: { expected_answer?: string; common_mistakes?: string[] }
     correction?: { overall_feedback?: string }
@@ -40,13 +40,15 @@ type SavedLibraryItem = {
 
 export default function SavedLibraryItemPage() {
   const { id } = useParams<{ id: string }>()
+  const router = useRouter()
+  const [savingNote, setSavingNote] = useState(false)
+  const [noteError, setNoteError] = useState("")
   const [item, setItem] = useState<SavedLibraryItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     fetch(`/api/library/${encodeURIComponent(id)}`)
       .then(async (response) => {
         const payload = await response.json()
@@ -60,6 +62,24 @@ export default function SavedLibraryItemPage() {
   }, [id])
 
   const snapshot = item?.content.snapshot
+
+  async function addToNotebook() {
+    if (!item || savingNote) return
+    setSavingNote(true)
+    setNoteError("")
+    try {
+      const response = await fetch("/api/notebook", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_type: "explanation", course_id: item.course_id,
+          library_item_id: item.id, title: item.title, content: "" }) })
+      const note = await response.json()
+      if (!response.ok) throw new Error(note.error || "Could not create the note.")
+      router.push(`/dashboard/notebook?note=${encodeURIComponent(note.id)}`)
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : "Could not create the note.")
+    } finally {
+      setSavingNote(false)
+    }
+  }
 
   return <main className="container mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-12">
     <Link href="/dashboard/library" className="mb-8 inline-flex items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground">
@@ -121,14 +141,9 @@ export default function SavedLibraryItemPage() {
 
       {!snapshot && <section className="space-y-5 rounded-2xl border border-border/60 bg-card/40 p-5 sm:p-7">
         {item.content.explanation ? <>
-          {item.content.explanation.definition && <p className="font-medium">{item.content.explanation.definition}</p>}
-          {item.content.explanation.intuition && <p className="whitespace-pre-wrap leading-relaxed text-muted-foreground">{item.content.explanation.intuition}</p>}
-          {item.content.explanation.sections?.map((section, index) => <div key={index} className="space-y-2 border-t border-border/50 pt-4">
-            <h2 className="font-medium">{section.heading}</h2>
-            {section.content && <p className="whitespace-pre-wrap leading-relaxed text-muted-foreground">{section.content}</p>}
-            {section.code && <pre className="overflow-x-auto rounded-lg bg-muted/60 p-4 text-xs"><code>{section.code}</code></pre>}
-          </div>)}
-          {item.content.explanation.course_example && <p className="whitespace-pre-wrap text-muted-foreground">{item.content.explanation.course_example}</p>}
+          <Button disabled={savingNote} onClick={() => void addToNotebook()}>{savingNote ? "Creating note" : "Add to Notebook"}</Button>
+          {noteError && <p role="alert" className="text-sm text-destructive">{noteError}</p>}
+          <ExplanationCard explanation={item.content.explanation} readOnly />
         </> : <>
           <p className="whitespace-pre-wrap leading-relaxed">{item.content.solution?.expected_answer || item.content.expected_answer || ""}</p>
           {item.content.correction?.overall_feedback && <p className="whitespace-pre-wrap text-muted-foreground">{item.content.correction.overall_feedback}</p>}

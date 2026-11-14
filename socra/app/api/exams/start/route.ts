@@ -5,5 +5,5 @@ export async function POST(request: Request) {
   if (!body || typeof body !== "object") {
     return Response.json({ detail: "Invalid exam request." }, { status: 400 })
   }
-  return proxyExamRequest("/exams/start", "POST", body)
+  return proxyExamRequest("/exams/start", "POST", body, 20_000)
 }

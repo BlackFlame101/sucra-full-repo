@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { useParams, useSearchParams } from "next/navigation"
+import { useParams } from "next/navigation"
 import { ArrowLeft, ArrowRight, BookOpen, Bookmark, CheckCircle2, ClipboardCheck, LoaderCircle, Settings, SkipForward, TriangleAlert } from "lucide-react"
+import { PdfCitation } from "@/components/documents/PdfCitation"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -34,6 +35,20 @@ function answerForInput(question: ExamQuestion, stored: string) {
   if (question.exercise_type !== "numerical" || !question.numeric_unit) return stored
   const escaped = question.numeric_unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
   return stored.replace(new RegExp(`\\s+${escaped}$`, "i"), "")
+}
+
+function draftKey(examId: string, questionId: string) {
+  return `socra:exam-draft:${examId}:${questionId}`
+}
+
+function readDraft(exam: CourseExam, question: ExamQuestion): string | undefined {
+  if (exam.status !== "in_progress") return
+  try {
+    const draft = JSON.parse(sessionStorage.getItem(draftKey(exam.id, question.id)) ?? "null")
+    if (typeof draft?.answer === "string" && draft.base === (exam.answers[question.id] ?? "")) return draft.answer
+  } catch {
+    // Exam answers already saved to the server remain available.
+  }
 }
 
 function completionBlankCount(question: ExamQuestion) {
@@ -78,11 +93,8 @@ function displaySubmittedAnswer(exerciseType: ExamQuestion["exercise_type"], cod
 
 export default function MixedExamPage() {
   const { courseId, sessionId } = useParams<{ courseId: string; sessionId: string }>()
-  const searchParams = useSearchParams()
-  const restoreSavedExam = searchParams.get("restore") === "1"
   const { getActiveConfig, loaded: settingsLoaded } = useUserSettings()
   const activeConfig = getActiveConfig()
-  const examStorageKey = `socra:exam:${sessionId}`
 
   const [exam, setExam] = useState<CourseExam | null>(null)
   const [topic, setTopic] = useState("")
@@ -98,6 +110,7 @@ export default function MixedExamPage() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [sessionSavedToLibrary, setSessionSavedToLibrary] = useState(false)
   const [savingSessionToLibrary, setSavingSessionToLibrary] = useState(false)
+  const actionPending = useRef(false)
   const [language, setLanguage] = useState<"fr" | "en">("fr")
 
   const questions = exam?.questions ?? []
@@ -105,7 +118,7 @@ export default function MixedExamPage() {
   const isCodeCompletion = currentQuestion?.exercise_type === "code" && currentQuestion.code_task_mode === "completion"
   const completedResults = useMemo(() => exam?.results ?? [], [exam?.results])
   const missingQuestionTypes = useMemo(() => {
-    if (!exam) return []
+    if (!exam || !["in_progress", "completed"].includes(exam.status)) return []
     const available = new Set(exam.questions.map((question) => question.exercise_type))
     return ([
       ["short_answer", "short-answer"],
@@ -127,55 +140,83 @@ export default function MixedExamPage() {
   }, [sessionId])
 
   useEffect(() => {
-    let cancelled = false
-    setInitializing(true)
-    setExam(null)
-    setError("")
-    const storedId = window.localStorage.getItem(examStorageKey)
-    fetch(`/api/sessions/${courseId}`).then((response) => response.ok ? response.json() : []).then((sessions) => {
-      const current = sessions.find((session: { id: string; language?: string }) => session.id === sessionId)
-      if (current?.language === "fr" || current?.language === "en") setLanguage(current.language)
-    }).catch(() => {})
-    if (!storedId && !restoreSavedExam) {
-      setInitializing(false)
-      return () => { cancelled = true }
-    }
-    const examUrl = storedId
-      ? `/api/exams/${encodeURIComponent(storedId)}`
-      : `/api/exams/session/${encodeURIComponent(sessionId)}`
-
-    fetch(examUrl, { cache: "no-store" })
+    const controller = new AbortController()
+    const signal = controller.signal
+    fetch("/api/sessions/" + encodeURIComponent(courseId), { signal })
+      .then((response) => response.ok ? response.json() : [])
+      .then((sessions) => {
+        if (signal.aborted) return
+        const current = sessions.find((session: { id: string; language?: string }) => session.id === sessionId)
+        if (current?.language === "fr" || current?.language === "en") setLanguage(current.language)
+      }).catch(() => {})
+    fetch("/api/exams/session/" + encodeURIComponent(sessionId), { cache: "no-store", signal })
       .then(async (response) => {
+        if (response.status === 404) return null
         const payload = await response.json()
         if (!response.ok) throw new Error(errorDetail(payload, "Could not restore this exam."))
         return payload as CourseExam
       })
       .then((restored) => {
-        if (cancelled) return
-        window.localStorage.setItem(examStorageKey, restored.id)
+        if (!restored || signal.aborted) return
         setExam(restored)
         setTopic(restored.topic)
-        setQuestionCount(restored.questions.length)
+        setQuestionCount(restored.question_count ?? restored.questions.length)
+        setSelectedTypes(restored.requested_types)
+        const draftIndex = restored.questions.findIndex((question) => readDraft(restored, question) !== undefined)
         const unanswered = restored.questions.findIndex((question) => !hasAnswerForQuestion(question, restored.answers[question.id] ?? ""))
-        setCurrentIndex(unanswered >= 0 ? unanswered : Math.max(0, restored.questions.length - 1))
+        setCurrentIndex(draftIndex >= 0 ? draftIndex : unanswered >= 0 ? unanswered : Math.max(0, restored.questions.length - 1))
       })
       .catch((cause: unknown) => {
-        if (!cancelled) {
-          if (storedId) window.localStorage.removeItem(examStorageKey)
-          setError(cause instanceof Error ? cause.message : "Could not restore this exam.")
-        }
+        if (!signal.aborted) setError(cause instanceof Error ? cause.message : "Could not restore this exam.")
       })
-      .finally(() => { if (!cancelled) setInitializing(false) })
-    return () => { cancelled = true }
-  }, [examStorageKey, restoreSavedExam, sessionId, courseId])
+      .finally(() => { if (!signal.aborted) setInitializing(false) })
+    return () => controller.abort()
+  }, [sessionId, courseId])
+
+  const activeExamId = exam?.id
+  const activeExamStatus = exam?.status
+  useEffect(() => {
+    if (!activeExamId || (activeExamStatus !== "preparing" && activeExamStatus !== "grading")) return
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const response = await fetch("/api/exams/" + encodeURIComponent(activeExamId), { cache: "no-store", signal: controller.signal })
+        if (controller.signal.aborted) return
+        if (!response.ok) throw new Error("Could not refresh exam progress.")
+        const updated: CourseExam = await response.json()
+        if (controller.signal.aborted) return
+        setError("")
+        setExam(updated)
+      } catch {
+        if (!controller.signal.aborted) setError("Could not refresh exam progress. Reconnecting.")
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(poll, 2_000)
+      }
+    }
+    timer = setTimeout(poll, 1_000)
+    return () => { controller.abort(); clearTimeout(timer) }
+  }, [activeExamId, activeExamStatus])
 
   useEffect(() => {
     if (!currentQuestion || !exam) {
       setAnswer("")
       return
     }
-    setAnswer(answerForInput(currentQuestion, exam.answers[currentQuestion.id] ?? ""))
+    setAnswer(readDraft(exam, currentQuestion) ?? answerForInput(currentQuestion, exam.answers[currentQuestion.id] ?? ""))
   }, [currentQuestion, exam])
+
+  const editAnswer = (value: string) => {
+    setAnswer(value)
+    if (!exam || exam.status !== "in_progress" || !currentQuestion) return
+    try {
+      sessionStorage.setItem(draftKey(exam.id, currentQuestion.id), JSON.stringify({
+        answer: value, base: exam.answers[currentQuestion.id] ?? "",
+      }))
+    } catch {
+      // A blocked browser store does not prevent saving to the server.
+    }
+  }
 
   const modelOptions = () => {
     const provider = activeConfig.provider === "groq" ? "groq" : "google"
@@ -197,8 +238,10 @@ export default function MixedExamPage() {
   }
 
   const startExam = async () => {
+    if (actionPending.current) return
+    actionPending.current = true
     setBusy(true)
-    setBusyMessage("Creating and verifying your exam")
+    setBusyMessage("Queuing your exam")
     setError("")
     try {
       await saveLanguage(language)
@@ -219,29 +262,30 @@ export default function MixedExamPage() {
       const payload = await response.json()
       if (!response.ok) throw new Error(errorDetail(payload, "Could not build a verified exam."))
       const started = payload as CourseExam
-      window.localStorage.setItem(examStorageKey, started.id)
       setExam(started)
       setCurrentIndex(0)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not build a verified exam.")
     } finally {
+      actionPending.current = false
       setBusy(false)
       setBusyMessage("")
     }
   }
 
   const saveAnswer = async () => {
-    if (!exam || !currentQuestion || !answer.trim()) return
+    if (!exam || exam.status !== "in_progress" || !currentQuestion || !answer.trim()) return
     const submitted = currentQuestion.exercise_type === "numerical" && currentQuestion.numeric_unit
       ? `${answer.trim()} ${currentQuestion.numeric_unit}`
       : answer.trim()
     const response = await fetch(`/api/exams/${encodeURIComponent(exam.id)}/answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ exercise_id: currentQuestion.id, answer: submitted }),
+      body: JSON.stringify({ exercise_id: currentQuestion.id, answer: submitted, previous_answer: exam.answers[currentQuestion.id] ?? "" }),
     })
     const payload = await response.json()
     if (!response.ok) throw new Error(errorDetail(payload, "Could not save your answer."))
+    try { sessionStorage.removeItem(draftKey(exam.id, currentQuestion.id)) } catch { /* server save succeeded */ }
     setExam((previous) => previous ? {
       ...previous,
       answers: { ...previous.answers, [currentQuestion.id]: submitted },
@@ -249,7 +293,7 @@ export default function MixedExamPage() {
   }
 
   const saveExamToLibrary = async () => {
-    if (!exam) return
+    if (!exam || !["in_progress", "completed"].includes(exam.status)) return
     setSavingSessionToLibrary(true)
     try {
       if (exam.status === "in_progress" && answer.trim()) await saveAnswer()
@@ -270,17 +314,27 @@ export default function MixedExamPage() {
   }
 
   const submitExam = async () => {
-    if (!exam) return
-    setBusyMessage("Grading your answers")
-    await saveLanguage(language)
-    const response = await fetch(`/api/exams/${encodeURIComponent(exam.id)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(modelOptions()),
-    })
-    const payload = await response.json()
-    if (!response.ok) throw new Error(errorDetail(payload, "Could not grade the exam."))
-    setExam(payload as CourseExam)
+    if (!exam || actionPending.current) return
+    actionPending.current = true
+    setBusy(true)
+    setError("")
+    try {
+      setBusyMessage("Queuing grading")
+      const response = await fetch(`/api/exams/${encodeURIComponent(exam.id)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(modelOptions()),
+      })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(errorDetail(payload, "Could not grade the exam."))
+      setExam(payload as CourseExam)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not submit the exam.")
+    } finally {
+      actionPending.current = false
+      setBusy(false)
+      setBusyMessage("")
+    }
   }
 
   const continueExam = async () => {
@@ -369,7 +423,7 @@ export default function MixedExamPage() {
         <div className="inline-flex items-center gap-2 rounded-full border border-secondary/30 bg-secondary/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-secondary">
           <ClipboardCheck className="h-3.5 w-3.5" /> Mixed course exam
         </div>
-        <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={!exam || busy || savingSessionToLibrary || sessionSavedToLibrary} onClick={() => void saveExamToLibrary()}>
+        <Button type="button" variant="outline" size="sm" className="gap-1.5" disabled={!exam || !["in_progress", "completed"].includes(exam.status) || busy || savingSessionToLibrary || sessionSavedToLibrary} onClick={() => void saveExamToLibrary()}>
           <Bookmark className={`h-4 w-4 ${sessionSavedToLibrary ? "fill-current text-secondary" : ""}`} />
           {savingSessionToLibrary ? "Saving…" : sessionSavedToLibrary ? "Saved to Library" : "Save to Library"}
         </Button>
@@ -378,7 +432,7 @@ export default function MixedExamPage() {
           {exam?.status === "completed" ? "Exam results" : "Test your course knowledge"}
         </h1>
         <p className="mt-3 max-w-2xl leading-relaxed text-muted-foreground">
-          {exam ? `${exam.questions.length} verified, course-grounded questions. Your answers are graded together when you finish.` : "Choose your question types and exam length. Socra balances selected types as evenly as possible and uses only formats the course material can support."}
+          {exam ? `${exam.question_count ?? exam.questions.length} course-grounded questions. Your answers are graded together when you finish.` : "Choose question types and length. Socra balances the selected formats and verifies each question against your course."}
         </p>
       </div>
 
@@ -432,7 +486,7 @@ export default function MixedExamPage() {
           />
           <fieldset className="mt-6 space-y-3" disabled={busy}>
             <legend className="text-sm font-medium">Question types</legend>
-            <p className="text-xs text-muted-foreground">Choose one or more. Each selected type appears at least once, so the shortest exam matches the number of selected types. Unavailable types may be replaced by another selected type.</p>
+            <p className="text-xs text-muted-foreground">Choose one or more. Each selected type appears at least once, so the shortest exam matches the number of selected types.</p>
             <div className="grid gap-2 sm:grid-cols-2">
               {EXAM_QUESTION_TYPES.map((type) => {
                 const checked = selectedTypes.includes(type.id)
@@ -496,6 +550,17 @@ export default function MixedExamPage() {
             {busy ? "Building and verifying your exam…" : "Create my exam"}
           </Button>
         </section>
+      ) : exam.status === "preparing" || exam.status === "grading" ? (
+        <ExamProgress message={exam.status === "preparing" ? "Verifying exam questions" : "Grading saved answers"} counts={exam.progress} />
+      ) : exam.status === "preparation_failed" || exam.status === "grading_failed" ? (
+        <section className="space-y-3 rounded-2xl border border-border/60 bg-card/40 p-5">
+          <p role="alert">{exam.error || "The exam could not finish. Retry to continue."}</p>
+          <p className="text-sm text-muted-foreground">{exam.progress?.completed ?? 0} of {exam.progress?.total ?? exam.question_count} completed.</p>
+          <Button type="button" variant="outline" onClick={() => setSettingsOpen(true)}>Open Settings</Button>
+          <Button disabled={busy || !settingsLoaded} onClick={() => void (exam.status === "preparation_failed" ? startExam() : submitExam())}>
+            {exam.status === "preparation_failed" ? "Retry exam preparation" : "Retry grading"}
+          </Button>
+        </section>
       ) : exam.status === "completed" ? (
         <section className="space-y-5">
           <div className="flex flex-col gap-2 rounded-2xl border border-secondary/25 bg-secondary/5 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-7">
@@ -549,7 +614,11 @@ export default function MixedExamPage() {
                   </li>
                 ))}
               </ul>
-              {result.citations.length > 0 && <p className="mt-4 text-xs text-muted-foreground">Course pages: {result.citations.map((citation) => `${citation.filename} · page ${citation.page_number}`).join("; ")}</p>}
+              {result.citations.length > 0 && <ul aria-label="Course pages" className="mt-4 space-y-1 text-xs">
+                {result.citations.map((citation, index) => <li key={`${citation.document_id}-${citation.page_number}-${index}`}>
+                  <PdfCitation documentId={citation.document_id} page={citation.page_number} filename={citation.filename} />
+                </li>)}
+              </ul>}
               <p className="mt-3 text-sm text-secondary">{result.next_step}</p>
             </article>
           ))}
@@ -612,14 +681,14 @@ export default function MixedExamPage() {
                 <legend className="sr-only">Choose one answer</legend>
                 {currentQuestion.choices.map((choice) => (
                   <label key={choice.id} className={`flex cursor-pointer items-start gap-3 rounded-xl border p-4 text-sm transition-colors ${answer === choice.id ? "border-primary bg-primary/5" : "border-border/70 hover:bg-muted/40"}`}>
-                    <input type="radio" name={`exam-${currentQuestion.id}`} value={choice.id} checked={answer === choice.id} onChange={() => setAnswer(choice.id)} className="mt-0.5 accent-primary" />
+                    <input type="radio" name={`exam-${currentQuestion.id}`} value={choice.id} checked={answer === choice.id} onChange={() => editAnswer(choice.id)} className="mt-0.5 accent-primary" />
                     <span><strong className="mr-2">{choice.id}.</strong>{choice.text}</span>
                   </label>
                 ))}
               </fieldset>
             ) : currentQuestion.exercise_type === "numerical" ? (
               <div className="flex items-center gap-3">
-                <Input type="text" inputMode="decimal" value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Enter a value" disabled={busy} className="h-11" />
+                <Input type="text" inputMode="decimal" value={answer} onChange={(event) => editAnswer(event.target.value)} placeholder="Enter a value" disabled={busy} className="h-11" />
                 {currentQuestion.numeric_unit && <span className="shrink-0 text-sm text-muted-foreground">{currentQuestion.numeric_unit}</span>}
               </div>
             ) : isCodeCompletion ? (
@@ -631,7 +700,7 @@ export default function MixedExamPage() {
                       value={value}
                       onChange={(event) => {
                         const updated = completionAnswersFor(currentQuestion, answer).map((item, itemIndex) => itemIndex === index ? event.target.value : item)
-                        setAnswer(updated.some((item) => item.trim()) ? JSON.stringify(updated) : "")
+                        editAnswer(updated.some((item) => item.trim()) ? JSON.stringify(updated) : "")
                       }}
                       placeholder="Type the missing word or expression…"
                       maxLength={200}
@@ -643,7 +712,7 @@ export default function MixedExamPage() {
                 ))}
               </div>
             ) : (
-              <Textarea value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder={currentQuestion.exercise_type === "sql" ? "Write a SELECT query…" : currentQuestion.exercise_type === "code" ? "Write your Python solution…" : "Write your answer in your own words…"} rows={currentQuestion.exercise_type === "code" || currentQuestion.exercise_type === "sql" ? 12 : 5} maxLength={10000} disabled={busy} spellCheck={currentQuestion.exercise_type !== "code" && currentQuestion.exercise_type !== "sql"} className={currentQuestion.exercise_type === "code" || currentQuestion.exercise_type === "sql" ? "font-mono" : undefined} />
+              <Textarea value={answer} onChange={(event) => editAnswer(event.target.value)} placeholder={currentQuestion.exercise_type === "sql" ? "Write a SELECT query…" : currentQuestion.exercise_type === "code" ? "Write your Python solution…" : "Write your answer in your own words…"} rows={currentQuestion.exercise_type === "code" || currentQuestion.exercise_type === "sql" ? 12 : 5} maxLength={10000} disabled={busy} spellCheck={currentQuestion.exercise_type !== "code" && currentQuestion.exercise_type !== "sql"} className={currentQuestion.exercise_type === "code" || currentQuestion.exercise_type === "sql" ? "font-mono" : undefined} />
             )}
           </div>
 
@@ -666,7 +735,7 @@ export default function MixedExamPage() {
   )
 }
 
-function ExamProgress({ message }: { message: string }) {
+function ExamProgress({ message, counts }: { message: string; counts?: CourseExam["progress"] }) {
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
     const started = Date.now()
@@ -683,10 +752,10 @@ function ExamProgress({ message }: { message: string }) {
             <span className="font-medium">{message}…</span>
             <span className="text-xs tabular-nums text-muted-foreground">Elapsed {elapsedLabel}</span>
           </div>
-          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-secondary/15">
-            <div className="h-full w-1/3 animate-[progress-slide_1.6s_ease-in-out_infinite] rounded-full bg-secondary" />
-          </div>
-          <p className="mt-2 text-xs text-muted-foreground">Checking each question against your course. This may take a little while; the result will appear here when it is ready.</p>
+          {counts && <div className="mt-2">
+            <progress className="h-2 w-full" aria-label={message} max={Math.max(1, counts.total)} value={counts.completed} />
+            <p className="text-xs text-muted-foreground">{counts.completed} of {counts.total} complete</p>
+          </div>}
         </div>
       </div>
     </div>

@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import websocket as ws_routes
 from api.routes import health
-from api.routes import documents
 from api.routes import exams
 from config import get_settings
 
@@ -24,6 +23,7 @@ logging.basicConfig(
     level=settings.log_level,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("socra-backend")
 
 
@@ -48,7 +48,6 @@ app.add_middleware(
 
 
 app.include_router(health.router)
-app.include_router(documents.router)
 app.include_router(exams.router)
 app.include_router(ws_routes.router)
 
