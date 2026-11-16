@@ -11,6 +11,7 @@ import { pdfPageUrl } from "@/components/documents/PdfCitation"
 import { UploadModal } from "@/components/documents/UploadModal"
 import { SaveResponseDialog, type CaptureTarget } from "@/components/notebook/SaveResponseDialog"
 import { useSocraChat } from "@/hooks/useSocraChat"
+import { useAuth } from "@/hooks/useAuth"
 import { usePdfPolling } from "@/hooks/usePdfPolling"
 import { useUserSettings } from "@/hooks/useUserSettings"
 import {
@@ -77,6 +78,7 @@ function storedModeKey(sessionId: string) {
 }
 
 export default function InquiryPage() {
+  const { user } = useAuth()
   const params = useParams<{ courseId: string; sessionId: string }>()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -491,15 +493,8 @@ export default function InquiryPage() {
     }
   }
 
-  const messageIdForExplanation = (value: PublicExplanation) => [...messages].reverse().find((message) => {
-    const metadata = message.metadata as { explanation?: PublicExplanation } | undefined
-    return message.role === "assistant" && metadata?.explanation === value
-  })?.id
-
-  const handleSaveExplanationToLibrary = (value: PublicExplanation) => {
+  const handleSaveExplanationToLibrary = (value: PublicExplanation, messageId: string) => {
     const source = value.citations[0]
-    const messageId = messageIdForExplanation(value)
-    if (!messageId) { toast.error("Wait for the explanation to finish saving."); return }
     void saveLibraryItem("explanation", value.sections?.[0]?.heading || value.definition.slice(0, 90), { explanation: value, message_id: messageId }, source?.document_id, source?.page_number ?? undefined)
   }
 
@@ -652,7 +647,11 @@ export default function InquiryPage() {
             onRevealSolution={handleRevealSolution}
             explanation={explanation}
             onDiscussExplanation={handleDiscussExplanation}
+            onContinueCourse={(from, requestId, label) => {
+              sendMessage({ text: label, mode: "explain", continuation: { from, requestId } })
+            }}
             onSaveExplanationToLibrary={handleSaveExplanationToLibrary}
+            explanationOwnerId={user?.id}
             onCaptureResponse={setCapture}
             sourceMessageId={searchParams.get("message")}
             onSaveExerciseToLibrary={handleSaveExerciseToLibrary}

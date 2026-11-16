@@ -109,6 +109,11 @@ class SocraState(TypedDict, total=False):
     model: str
     provider: str
     language: str
+    explain_language_explicit: bool
+    explain_document_id: str
+    explain_course_prior: dict
+    explain_inventory: dict[str, Any]
+    explain_evidence_chunk_ids: list[str]
     mode: Literal["socratic", "exercise", "explain", "correct"]
     for_exam: bool
     course_search_query: str

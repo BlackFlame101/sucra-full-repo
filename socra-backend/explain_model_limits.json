@@ -1,0 +1,52 @@
+{
+  "models": [
+    {
+      "provider": "google",
+      "model_id": "gemini-3.5-flash-lite",
+      "context_tokens": 1048576,
+      "max_output_tokens": 65536,
+      "tokens_per_minute": 250000,
+      "requests_per_minute": 15,
+      "requests_per_day": 500,
+      "tokens_per_day": null,
+      "checked_on": "2026-11-15",
+      "quota_source": "User's provider dashboard",
+      "specification": "https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite"
+    },
+    {
+      "provider": "groq",
+      "model_id": "openai/gpt-oss-120b",
+      "context_tokens": 131072,
+      "max_output_tokens": 65536,
+      "tokens_per_minute": 8000,
+      "requests_per_minute": 30,
+      "requests_per_day": 1000,
+      "tokens_per_day": 200000,
+      "checked_on": "2026-11-15",
+      "quota_source": "User's provider dashboard",
+      "specification": "https://console.groq.com/docs/model/openai/gpt-oss-120b"
+    },
+    {
+      "provider": "groq",
+      "model_id": "openai/gpt-oss-20b",
+      "context_tokens": 131072,
+      "max_output_tokens": 65536,
+      "tokens_per_minute": 8000,
+      "requests_per_minute": 30,
+      "requests_per_day": 1000,
+      "tokens_per_day": 200000,
+      "checked_on": "2026-11-15",
+      "quota_source": "User's provider dashboard",
+      "specification": "https://console.groq.com/docs/model/openai/gpt-oss-20b"
+    }
+  ],
+  "policy": {
+    "concurrency_reserve_percent": 20,
+    "framing_reserve_tokens": 256,
+    "retry_prompt_reserve_tokens": 384,
+    "max_output_tokens": 16000,
+    "min_output_tokens": 768,
+    "max_added_evidence_chunks": 4,
+    "estimate_utf8_bytes_per_token": 3
+  }
+}

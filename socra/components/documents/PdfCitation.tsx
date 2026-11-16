@@ -1,6 +1,6 @@
-export function pdfPageUrl(documentId: string, page: number) {
-  return `/api/documents/view/${encodeURIComponent(documentId)}?page=${page}#page=${page}`
-}
+import { pdfPageUrl } from "@/lib/documents/pdf-page"
+
+export { pdfPageUrl }
 
 export function PdfCitation({ documentId, page, filename }: { documentId?: string | null; page?: number | null; filename: string }) {
   const label = page ? `${filename} · page ${page}` : filename

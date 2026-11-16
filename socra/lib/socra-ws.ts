@@ -40,13 +40,39 @@ export type NotebookAction = "ask" | "related" | "improve" | "expand" | "simplif
 export type NotebookContext = { id: string; action: NotebookAction; selection?: string }
 
 export interface PublicExplanation {
+  presentation?: "brief" | "standard" | "walkthrough" | "beginner" | "revision_sheet" | "full_course"
+  language?: string
+  course_progress?: CourseProgress
+  coverage_notices?: { heading: string; content: string }[]
   definition: string
   intuition: string
-  sections?: Array<{ heading: string; content: string; code?: string; code_language?: string; walkthrough?: Array<{ code: string; explanation: string }> }>
+  sections?: ExplanationSection[]
   course_example: string
   common_pitfalls: string[]
   citations: ExerciseCitation[]
   check_question: string
+}
+
+export interface CourseProgress {
+  part: number
+  total_parts: number
+  request_id: string | null
+  next_request_id: string | null
+  language: string
+  inventory_uncertain: boolean
+  generated_parts?: Array<{ part: number; request_id: string | null }>
+  sections: Array<{ id: string; title: string; start: number; end: number; part: number
+    status: "covered" | "partial" | "missing" | "unverifiable" | "not_yet_generated" }>
+}
+
+export interface ExplanationSection {
+  heading: string
+  content: string
+  code?: string
+  code_language?: string
+  walkthrough?: Array<{ code: string; explanation: string }>
+  citations?: ExerciseCitation[] | null
+  covers?: string[] | null
 }
 
 export interface ExerciseCitation {

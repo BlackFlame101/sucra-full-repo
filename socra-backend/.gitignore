@@ -41,6 +41,8 @@ env/
 htmlcov/
 .tox/
 .cache
+# Local fixtures can contain private saved answers and course excerpts.
+/tests/fixtures/local/
 
 # Env
 .env

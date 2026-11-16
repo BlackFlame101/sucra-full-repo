@@ -1,11 +1,13 @@
 "use client"
 
 import { Bot } from "lucide-react"
+import { StudyMarkdown } from "@/components/notebook/NotebookReply"
 
 interface TutorMessageProps {
   content: string
   isStreaming?: boolean
   partial?: boolean
+  explanationPreview?: boolean
 }
 
 function inlineMarkdown(text: string) {
@@ -32,7 +34,7 @@ function formatTutorContent(content: string) {
   })
 }
 
-export function TutorMessage({ content, isStreaming, partial }: TutorMessageProps) {
+export function TutorMessage({ content, isStreaming, partial, explanationPreview }: TutorMessageProps) {
   return (
     <div className="flex min-w-0 max-w-[85%] gap-3">
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary/15 mt-1">
@@ -50,7 +52,7 @@ export function TutorMessage({ content, isStreaming, partial }: TutorMessageProp
         </span>
         <div className="min-w-0 max-w-full rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3">
           <div className="font-serif text-[15px] leading-relaxed text-foreground/90">
-            {formatTutorContent(content)}
+            {explanationPreview ? <StudyMarkdown content={content} /> : formatTutorContent(content)}
             {partial && <p className="mt-2 text-xs text-muted-foreground">Partial response</p>}
             {!isStreaming && !partial && <button type="button" className="mt-2 text-xs text-secondary" onClick={() => void navigator.clipboard.writeText(content)}>Copy response</button>}
             {isStreaming && (

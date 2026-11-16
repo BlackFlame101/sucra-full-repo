@@ -1,3 +1,4 @@
+import "katex/dist/katex.min.css"
 import type { Metadata } from "next"
 import { newsreader, manrope } from "@/lib/fonts"
 import { Providers } from "@/components/providers"

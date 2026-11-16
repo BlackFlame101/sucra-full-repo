@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import test from "node:test"
+import * as marked from "marked"
 import ts from "typescript"
 
 function load(path, dependencies) {
@@ -319,7 +320,13 @@ test("saved explanation converts to editable notes from the stored card", async 
       return query
     },
   }
-  const { explanationNoteText } = load("lib/ai/explanation-note.ts", {})
+  const document = load("lib/notebook/document.ts", { marked: marked })
+  const { explanationNoteText } = load("lib/ai/explanation-note.ts", {
+    "@/lib/ai/explanation-presentation": load("lib/ai/explanation-presentation.ts", {
+      "@/lib/notebook/document": document, marked: marked,
+    }),
+    "@/lib/documents/pdf-page": load("lib/documents/pdf-page.ts", {}),
+  })
   const { POST } = load("app/api/notebook/route.ts", {
     "next/server": { NextResponse: Response },
     "@/lib/ai/explanation-note": { explanationNoteText },

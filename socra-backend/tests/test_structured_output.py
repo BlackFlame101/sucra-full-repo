@@ -1,12 +1,13 @@
 """Regression checks for provider content shapes and safe fallback extraction."""
 from __future__ import annotations
 
+import json
 import unittest
 from uuid import uuid4
 
 from agents.evaluateur import _fallback_key_terms
 from agents.evaluateur import _normalise_evaluation
-from agents.structured_output import message_text, parse_json_object
+from agents.structured_output import message_text, parse_json_object, recover_json_prefix
 from agents.exercise_generator import (
     _validate_type_specific,
     public_exercise,
@@ -19,6 +20,16 @@ from models.schemas import GeneratedExercise
 
 
 class StructuredOutputTests(unittest.TestCase):
+    def test_truncated_json_recovers_only_complete_sections(self):
+        good = {"heading": 'A heading with "}]"', "content": "A complete section with a backslash \\ and braces {}."}
+        prefix = '{"citations":[1],"sections":[' + json.dumps(good)
+        for cut in ('', ',{"heading":"Unfinished', ',{"heading":"Unfinished' + chr(92),
+                    ',{"heading":"Complete field","content":"Still open"'):
+            with self.subTest(cut=cut):
+                self.assertEqual(recover_json_prefix(prefix + cut, frozenset({"sections", "citations"})),
+                                 {"citations": [1], "sections": [good]})
+        self.assertEqual(recover_json_prefix('{"citations":[1,2', frozenset({"citations"})), {"citations": [1]})
+
     def test_extracts_text_from_langchain_content_blocks(self) -> None:
         content = [{"type": "text", "text": '{"topic": "Entropy"}'}]
         self.assertEqual(message_text(content), '{"topic": "Entropy"}')
@@ -29,6 +40,12 @@ class StructuredOutputTests(unittest.TestCase):
             parse_json_object('Result:\n```json\n{"score": 0.7}\n```'),
             {"score": 0.7},
         )
+
+    def test_outer_json_wrapper_keeps_script_fences_inside_strings(self):
+        fence = chr(96) * 3
+        data = {"content": f"{fence}python\nprint({{'hello': 'world'}})\n{fence}"}
+        wrapped = f"Result:\n{fence}json\n{json.dumps(data)}\n{fence}"
+        self.assertEqual(parse_json_object(wrapped), data)
 
     def test_accepts_literal_single_quoted_object_safely(self) -> None:
         self.assertEqual(parse_json_object("{'topic': 'Entropy'}"), {"topic": "Entropy"})

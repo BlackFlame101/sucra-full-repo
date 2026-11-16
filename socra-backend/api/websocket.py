@@ -387,6 +387,25 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 await emit("error", "The Notebook selection or context is unavailable. Save the note and try again.")
                 return
         fingerprint_fields = [action, requested_mode, exercise_id, student_message, attempt_request.hints_used if attempt_request else 0]
+        prior_course = None
+        if payload.get("continueCourseFrom") is not None:
+            from agents.explain_tasks import explain_flag
+
+            try:
+                if requested_mode != "explain" or action != "message" or not explain_flag("EXPLAIN_INTENT_PLANS"):
+                    raise ValueError
+                prior_request = str(UUID(str(payload["continueCourseFrom"])))
+                previous = await asyncio.to_thread(messages_db.load_study_turn, session_id, user_id, prior_request)
+                prior_course = next(
+                    ((row.get("metadata") or {}).get("explanation") or {}).get("course_progress")
+                    for row in (previous or {}).get("request_messages", []) if row["role"] == "assistant"
+                )
+                if not prior_course or prior_course.get("next_request_id") != current_request:
+                    raise ValueError
+            except (ValueError, StopIteration):
+                await emit("error", "Open the saved course part in this inquiry to continue.")
+                return
+            fingerprint_fields = ["continue_course", prior_request]
         if note_id:
             fingerprint_fields.extend([note_id, note_action, selection])
         fingerprint = sha256(json.dumps(
@@ -485,6 +504,8 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             await emit("error", "Could not save your prompt. Try again.")
             return
 
+        if prior_course:
+            student_message = prior_course["topic"]
         history.append({"role": "user", "content": student_message})
 
         initial_state = _build_initial_state(
@@ -504,6 +525,15 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         if stored_diagnostic:
             initial_state["diagnostic"] = stored_diagnostic
         initial_state["request_id"] = current_request
+        if prior_course:
+            initial_state["explain_course_prior"] = prior_course
+        initial_state["explain_language_explicit"] = payload.get("language") in ("fr", "en")
+        if requested_mode == "explain" and payload.get("documentId") is not None:
+            try:
+                initial_state["explain_document_id"] = str(UUID(str(payload["documentId"])))
+            except ValueError:
+                await emit("error", "Choose a valid PDF for this inquiry.")
+                return
         if context:
             initial_state["notebook_context"] = context
             initial_state["notebook_action"] = note_action

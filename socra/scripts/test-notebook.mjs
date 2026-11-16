@@ -166,17 +166,30 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   let ownsCourse = false
   let saved
   let correction
+  let explanation
   let revealed = false
   let answerReads = 0
   const client = { auth: { getUser: async () => ({ data: { user: { id: "owner" } } }) }, from: (table) => {
     if (table === "sessions") return query((fields) => ownsCourse && fields["courses.user_id"] === "owner" ? { id: session } : null)
+    if (table === "documents") return { select: () => ({ eq: (key, value) => {
+      assert.deepEqual([key, value], ["course_id", course])
+      return { in: async (_column, ids) => {
+        assert.ok(ids.includes(id))
+        return { data: [{ id, filename: "Course.pdf", page_count: 4 }] }
+      } }
+    } }) }
     assert.equal(table, "messages")
     return query((fields) => fields.role === "assistant" && fields.session_id === session
-      ? { content: "The **verified phrase** is useful.", metadata: correction ? { correction, exercise_id: id } : {} } : null)
+      ? { content: "The **verified phrase** is useful.", metadata: explanation ? { explanation } : correction ? { correction, exercise_id: id } : {} } : null)
   } }
   const { POST } = load("app/api/notebook/capture/route.ts", {
     "next/server": { NextResponse: Response },
-    "@/lib/ai/explanation-note": load("lib/ai/explanation-note.ts"),
+    "@/lib/ai/explanation-note": load("lib/ai/explanation-note.ts", {
+      "@/lib/ai/explanation-presentation": load("lib/ai/explanation-presentation.ts", {
+        "@/lib/notebook/document": document,
+      }),
+      "@/lib/documents/pdf-page": load("lib/documents/pdf-page.ts"),
+    }),
     "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
     "@/lib/supabase/server": { createClient: async () => client, createServiceClient: async () => ({
       from: (table) => {
@@ -213,4 +226,19 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   revealed = true
   assert.equal((await save(null)).status, 200)
   assert.match(saved.body_text, /The private solution/)
+
+  explanation = {
+    definition: "", intuition: "", citations: [],
+    sections: [{ heading: "Screenshot checkpoint", content: "Capture the setup.",
+      citations: [{ document_id: id, filename: "Old name.pdf", page_number: 4 },
+        { document_id: id, filename: "Out of bounds.pdf", page_number: 5 },
+        { document_id: session, filename: "Other course.pdf", page_number: 1 }] },
+    { heading: "Incomplete explanation", content: "Ask to continue with step 3." }],
+  }
+  assert.equal((await save(null)).status, 200)
+  assert.deepEqual(saved.source_citations, [{ document_id: id, page_number: 4, filename: "Course.pdf" }])
+  const note = JSON.stringify(saved.body_nodes)
+  assert.match(note, /[?]page=4#page=4/)
+  assert.match(note, /Ask to continue with step 3/)
+  assert.doesNotMatch(note, /Out of bounds|Other course|[?]page=5/)
 })

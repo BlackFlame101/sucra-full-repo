@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+_FENCE_RE = re.compile(r"^[ \t]*\x60{3}(?:json)?[ \t]*(?:\r?\n|(?=[{\[]))(.*?)^[ \t]*\x60{3}[ \t]*(?:\r?$)", re.IGNORECASE | re.DOTALL | re.MULTILINE)
 
 
 def message_text(content: Any) -> str:
@@ -30,12 +30,13 @@ def message_text(content: Any) -> str:
 def parse_json_object(content: Any) -> dict[str, Any]:
     """Parse a model response as an object, tolerating fences and wrappers."""
     text = message_text(content)
-    match = _FENCE_RE.search(text)
-    if match:
-        text = match.group(1).strip()
-    else:
-        if text.lstrip().startswith("["):
-            raise ValueError("Model response must contain an object, not an array")
+    # Fences within JSON string values are part of the response, not its wrapper.
+    if not text.startswith(("{", "[")):
+        match = _FENCE_RE.search(text)
+        if match:
+            text = match.group(1).strip()
+    if text.startswith("["):
+        raise ValueError("Model response must contain an object, not an array")
 
     decoder = json.JSONDecoder()
     starts = [index for index, char in enumerate(text) if char == "{"]
@@ -58,3 +59,55 @@ def parse_json_object(content: Any) -> dict[str, Any]:
     if last_error:
         raise last_error
     raise ValueError("Model response must contain a JSON object")
+
+
+def recover_json_prefix(content: Any, partial_arrays: frozenset[str]) -> dict[str, Any]:
+    """Recover complete top-level fields and complete items of selected arrays."""
+    text = re.sub(r"^\x60\x60\x60(?:json)?\s*", "", message_text(content), count=1, flags=re.IGNORECASE)
+    if not text.startswith("{"):
+        return {}
+    decoder = json.JSONDecoder()
+    recovered: dict[str, Any] = {}
+
+    def skip_space(position: int) -> int:
+        while position < len(text) and text[position].isspace():
+            position += 1
+        return position
+
+    position = skip_space(1)
+    while text[position:position + 1] == '"':
+        try:
+            key, end = decoder.raw_decode(text, position)
+            colon = skip_space(end)
+            if text[colon:colon + 1] != ":":
+                break
+            position = skip_space(colon + 1)
+            if key in partial_arrays and text[position:position + 1] == "[":
+                items = []
+                recovered[key] = items
+                position = skip_space(position + 1)
+                while text[position:position + 1] != "]":
+                    item, end = decoder.raw_decode(text, position)
+                    position = skip_space(end)
+                    delimiter = text[position:position + 1]
+                    # An object has an explicit ending. A bare numeric index
+                    # at EOF could still be the prefix of a larger index.
+                    if delimiter in {",", "]"} or (not delimiter and isinstance(item, dict)):
+                        items.append(item)
+                    if delimiter != ",":
+                        break
+                    position = skip_space(position + 1)
+                if text[position:position + 1] != "]":
+                    break
+                position = skip_space(position + 1)
+            else:
+                value, end = decoder.raw_decode(text, position)
+                position = skip_space(end)
+                if text[position:position + 1] in {"", ",", "}"}:
+                    recovered[key] = value
+            if text[position:position + 1] != ",":
+                break
+            position = skip_space(position + 1)
+        except json.JSONDecodeError:
+            break
+    return recovered

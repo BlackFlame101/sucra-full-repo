@@ -17,13 +17,13 @@ function getTextContent(message: UIMessage): string {
 }
 
 export function Message({ message, isStreaming }: MessageProps) {
-  const metadata = message.metadata as { explanation?: unknown; partial?: boolean } | undefined
+  const metadata = message.metadata as { explanation?: unknown; explanationPreview?: boolean; partial?: boolean } | undefined
   if (message.role === "assistant" && metadata?.explanation) return null
   const text = getTextContent(message)
   if (!text) return null
 
   if (message.role === "assistant") {
-    return <TutorMessage content={text} isStreaming={isStreaming} partial={metadata?.partial} />
+    return <TutorMessage content={text} isStreaming={isStreaming} partial={metadata?.partial} explanationPreview={metadata?.explanationPreview} />
   }
   return <StudentMessage content={text} />
 }

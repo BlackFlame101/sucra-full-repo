@@ -34,11 +34,13 @@ export async function POST(request: Request) {
   const kind = explanation ? "explanation" : correction ? "exercise" : "tutor"
   if (metadata.exercise && !correction) return fail("Save the feedback after answering the exercise.", 400)
   let content = message.content
-  let citations: ExerciseCitation[] = explanation?.citations ?? correction?.citations ??
+  const explanationCitations = explanation && [
+    ...(explanation.citations ?? []), ...(explanation.sections ?? []).flatMap((section) => section.citations ?? []),
+  ]
+  let citations: ExerciseCitation[] = explanationCitations ?? correction?.citations ??
     (metadata.course_context?.suggested_readings ?? []).flatMap((reading) => reading.document_id
       ? [{ ...reading, document_id: reading.document_id, filename: reading.filename ?? "Course PDF" }] : [])
   const service = await createServiceClient()
-  if (explanation) content = explanationNoteText(explanation)
   if (correction) {
     content = ["## Feedback", correction.overall_feedback,
       ...correction.criterion_feedback.flatMap((item) => [`### ${item.criterion}`, `${item.awarded_points} / ${item.possible_points}`, item.feedback]),
@@ -67,6 +69,9 @@ export async function POST(request: Request) {
     }
   }
 
+  if (explanation) citations = [...new Map(citations.map((citation) => [
+    citation.document_id + ":" + citation.page_number, citation,
+  ])).values()]
   if (citations.length) {
     const { data: documents, error } = await client.from("documents").select("id,filename,page_count")
       .eq("course_id", body.course_id).in("id", [...new Set(citations.map((citation) => citation.document_id))])
@@ -78,6 +83,19 @@ export async function POST(request: Request) {
     })
   }
 
+  if (explanation) {
+    const authorized = new Map(citations.map((citation) => [
+      citation.document_id + ":" + citation.page_number, citation,
+    ]))
+    const verify = (refs?: ExerciseCitation[] | null) => (refs ?? []).flatMap((citation) => {
+      const match = authorized.get(citation.document_id + ":" + citation.page_number)
+      return match ? [match] : []
+    })
+    content = explanationNoteText({
+      ...explanation, citations: verify(explanation.citations),
+      sections: explanation.sections?.map((section) => ({ ...section, citations: verify(section.citations) })),
+    })
+  }
   let doc
   try { doc = validateNoteDocument(markdownNote(content)) }
   catch { return fail("This response could not be converted into a note.", 422) }

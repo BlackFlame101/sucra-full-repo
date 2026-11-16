@@ -10,10 +10,27 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from agents.course_summarizer import DocumentSummary, summarize_document
 from rag.ocr import OcrInputError, recognize_pages
 from rag.retriever import retrieve_summary_guided_chunks
 from db.job_credentials import decrypt_key
 from worker import InvalidDocument, chunk_pages, extract_pages, process_job, remove_abandoned_uploads, remove_deleted_pdf_objects
+
+
+class CourseMapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_section_indices_are_unique_across_batches(self):
+        batches = [(1, 2, "first"), (3, 4, "second"), (5, 6, "third")]
+        summaries = [
+            DocumentSummary(title="Course", summary="Overview " * 8, sections=[
+                {"title": f"Page {page}", "summary": "Grounded summary " * 4,
+                 "page_start": page, "page_end": page} for page in range(start, end + 1)
+            ]) for start, end, _ in batches
+        ]
+        with patch("agents.course_summarizer._batches", return_value=batches), \
+             patch("agents.course_summarizer._summarize_batch", AsyncMock(side_effect=summaries)):
+            result = await summarize_document({}, ["text"] * 6)
+        self.assertEqual([section["section_index"] for section in result["sections"]], list(range(6)))
+        self.assertEqual([section["page_start"] for section in result["sections"]], list(range(1, 7)))
 
 
 def fixture_pdf(pages: list[str]) -> bytes:

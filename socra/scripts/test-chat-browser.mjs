@@ -151,13 +151,23 @@ const suite = async function (modules) {
   const recovered = sockets[1]
   await authenticate(recovered)
   check(recovered.sent[1].requestId === id && chat.messages.length === 2, "Reconnect lost the idempotency key")
-  recovered.push("card_ready", { kind: "explanation", card: { definition: "Verified" } }, id, 1)
-  recovered.push("response_complete", { message_id: "persisted", text: "Course explanation ready." }, id, 2)
+  const explanation = { definition: "Verified", check_question: "Why compare the same metric?" }
+  recovered.push("content_delta", { text: explanation.check_question }, id, 1)
+  await wait(() => chat.messages[1].parts[0].text === explanation.check_question, "Question preview was missing")
+  recovered.push("card_ready", { kind: "explanation", card: explanation }, id, 2)
+  await wait(() => chat.messages[1].metadata?.explanation, "Final card did not replace the preview")
+  // History can already contain the row that recovery is about to acknowledge.
+  chat.setMessages((history) => [...history, {
+    ...history[1], id: "persisted", metadata: { ...history[1].metadata, persisted: true, request_id: id },
+  }])
+  await wait(() => chat.messages.length === 3, "Restored row was not loaded into the fixture")
+  recovered.push("response_complete", { message_id: "persisted", text: "Course explanation ready." }, id, 3)
   await wait(() => chat.status === "ready" && chat.messages[1].id === "persisted", "Completion did not release input")
+  check(chat.messages.filter((message) => message.id === "persisted").length === 1, "Replay duplicated a persisted explanation card")
   check(chat.messages[1].metadata.explanation.definition === "Verified", "Final card was lost")
-  recovered.push("context_update", { key_terms: ["late"] }, id, 3)
+  recovered.push("context_update", { key_terms: ["late"] }, id, 4)
   await wait(() => context?.key_terms[0] === "late", "Late context was lost")
-  recovered.push("done", null, id, 4)
+  recovered.push("done", null, id, 5)
   chat.regenerate()
   await wait(() => recovered.sent.length === 3, "Regenerate did not dispatch")
   check(recovered.sent.at(-1).requestId !== id && chat.messages.length === 4, "Regenerate should create a new turn")

@@ -151,6 +151,7 @@ def get_chat_llm(
     provider: str | None = None,
     response_schema: dict[str, Any] | None = None,
     max_completion_tokens: int | None = None,
+    single_attempt: bool = False,
     agent: str = "unknown",
     request_id: str | None = None,
 ) -> Any:
@@ -161,11 +162,15 @@ def get_chat_llm(
     are absent we return a process-wide cached instance.
 
     ``max_retries`` is honored by both provider integrations for streaming
-    and non-streaming calls.
+    and non-streaming calls. Use ``single_attempt`` when the caller owns the
+    retry budget, including any fallback.
     """
     chosen_provider = (provider or "google").strip().lower()
     chosen_key = (api_key or "").strip() or None
     chosen_model = (model or "").strip() or None
+    if single_attempt:
+        # Gemini counts total attempts. OpenAI counts additional retries.
+        max_retries = 0 if chosen_provider == "groq" else 1
 
     def monitor(llm, model_id: str):
         # Keep logged model IDs single-line and exclude credentials and prompt content.
@@ -204,7 +209,7 @@ def get_chat_llm(
 
         primary = monitor(_groq_json_model(groq_model, primary_model_id, response_schema), primary_model_id)
         backup_model_id = settings.groq_backup_model
-        if not backup_model_id or backup_model_id == primary_model_id:
+        if single_attempt or not backup_model_id or backup_model_id == primary_model_id:
             return primary
         # Retry only Groq's JSON generation failure with another generally
         # available text model. Do not mask key, quota, permission, or rate errors.

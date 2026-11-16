@@ -56,6 +56,14 @@ function blocks(tokens: Token[]): JSONContent[] {
       case "hr": return [{ type: "horizontalRule" }]
       case "blockMath": return [{ type: t.type, attrs: { latex: (t as MathToken).latex } }]
       case "blockquote": return [{ type: "blockquote", content: blocks(t.tokens ?? []) }]
+      case "table": {
+        // Notebook has no editable table node. Keep the Markdown rows copyable
+        // using the editor's existing hard breaks instead of collapsed whitespace.
+        const rows = t.raw.replace(/\n+$/, "").split("\n")
+        return [{ type: "paragraph", content: rows.flatMap((row: string, index: number) => [
+          ...(index ? [{ type: "hardBreak" }] : []), ...textNode(row),
+        ]) }]
+      }
       case "list": {
         const items = t.items as Tokens.ListItem[]
         const tasks = items.every((item) => item.task)
@@ -74,8 +82,12 @@ function blocks(tokens: Token[]): JSONContent[] {
   })
 }
 
+export function lexStudyMarkdown(value: string): Token[] {
+  return markdown.lexer(value)
+}
+
 export function markdownNote(value: string): NoteDocument {
-  const content = blocks(markdown.lexer(value))
+  const content = blocks(lexStudyMarkdown(value))
   return content.length ? { type: "doc", content } : emptyNote
 }
 

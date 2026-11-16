@@ -23,6 +23,7 @@ type SavedExam = {
 }
 type SavedLibraryItem = {
   id: string
+  user_id?: string
   course_id: string
   title: string
   item_type: "explanation" | "exercise" | "inquiry" | "exam"
@@ -30,6 +31,8 @@ type SavedLibraryItem = {
   original_session_id: string | null
   created_at: string
   content: {
+    message_id?: string
+    session_id?: string
     snapshot?: { kind?: "inquiry" | "exam"; messages?: SavedMessage[]; exam?: SavedExam }
     explanation?: PublicExplanation
     expected_answer?: string
@@ -114,7 +117,8 @@ export default function SavedLibraryItemPage() {
             </article>
             {message.role === "assistant" && exercise && <ExerciseCard exercise={exercise} onNextExercise={() => {}} onSubmitAttempt={() => {}} readOnly />}
             {message.role === "assistant" && correction && <ExerciseFeedbackCard correction={correction} solution={solution ?? null} onRevealSolution={() => {}} onNextExercise={() => {}} readOnly />}
-            {message.role === "assistant" && explanation && <ExplanationCard explanation={explanation} readOnly />}
+            {message.role === "assistant" && explanation && <ExplanationCard explanation={explanation}
+              ownerId={item.user_id} explanationId={message.id} readOnly />}
           </div>
         }) : <p className="rounded-xl border border-dashed border-border p-6 text-sm text-muted-foreground">This saved inquiry has no messages.</p>}
       </section>}
@@ -142,8 +146,14 @@ export default function SavedLibraryItemPage() {
       {!snapshot && <section className="space-y-5 rounded-2xl border border-border/60 bg-card/40 p-5 sm:p-7">
         {item.content.explanation ? <>
           <Button disabled={savingNote} onClick={() => void addToNotebook()}>{savingNote ? "Creating note" : "Add to Notebook"}</Button>
+          {item.content.explanation.course_progress && (item.original_session_id || item.content.session_id) && <Button asChild variant="outline">
+            <Link href={`/dashboard/course/${item.course_id}/inquiry/${item.original_session_id || item.content.session_id}`}>
+              {item.content.explanation.language === "French" ? "Reprendre dans la conversation" : "Resume in conversation"}
+            </Link>
+          </Button>}
           {noteError && <p role="alert" className="text-sm text-destructive">{noteError}</p>}
-          <ExplanationCard explanation={item.content.explanation} readOnly />
+          <ExplanationCard explanation={item.content.explanation} ownerId={item.user_id}
+            explanationId={item.content.message_id || "library:" + item.id} readOnly />
         </> : <>
           <p className="whitespace-pre-wrap leading-relaxed">{item.content.solution?.expected_answer || item.content.expected_answer || ""}</p>
           {item.content.correction?.overall_feedback && <p className="whitespace-pre-wrap text-muted-foreground">{item.content.correction.overall_feedback}</p>}

@@ -70,7 +70,8 @@ interface UseSocraChatReturn {
   disconnect: () => void
 }
 
-type ChatMessageRequest = { text: string; displayText?: string; mode?: LearningMode; notebook?: NotebookContext }
+type ChatMessageRequest = { text: string; displayText?: string; mode?: LearningMode; notebook?: NotebookContext
+  continuation?: { from: string; requestId: string } }
 
 type Turn = {
   id: string
@@ -266,16 +267,31 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           case "explanation": onCard({ kind: "explanation", card: msg.content }); break
           case "correction": onCard({ kind: "correction", card: msg.content }); break
           case "solution": onCard({ kind: "solution", card: msg.content }); break
-          case "response_complete":
+          case "response_complete": {
             flush()
-            updateDraft(turn, (message) => ({
-              ...message,
-              id: msg.content.message_id || message.id,
-              metadata: { ...(message.metadata as object), persisted: Boolean(msg.content.message_id) },
-              parts: [{ type: "text", text: msg.content.text }],
-            }))
+            const { message_id: savedId, text } = msg.content
+            setMessages((previous) => {
+              const draft = previous.find((message) => message.id === turn.id)
+              if (!draft) return previous
+              const saved = savedId && previous.find((message) => message.id === savedId)
+              const completed: UIMessage = {
+                ...draft,
+                id: savedId || draft.id,
+                metadata: {
+                  ...(saved ? saved.metadata as object : {}),
+                  ...(draft.metadata as object),
+                  request_id: turn.id,
+                  persisted: Boolean(savedId),
+                },
+                parts: [{ type: "text", text }],
+              }
+              // Recovery and history can both observe the same persisted response.
+              return previous.flatMap((message) => message.id === draft.id ? [completed]
+                : message.id === savedId ? [] : [message])
+            })
             finish(false)
             break
+          }
           case "cancelled": finish(true, "Generation stopped."); break
           case "done": finish(false); break
           case "progress": setProgress(msg.content.stage); break
@@ -311,7 +327,8 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
         const notebookAction = (turn.body.notebook as NotebookContext | undefined)?.action
         const metadata = notebookAction ? { notebook_action: notebookAction, request_id: turn.id } : undefined
         return [...history, { ...localMessage(turn.id + ":user", "user", display), metadata },
-          { ...localMessage(turn.id, "assistant", ""), metadata }]
+          { ...localMessage(turn.id, "assistant", ""), metadata: turn.body.mode === "explain"
+            ? { ...metadata, explanationPreview: true } : metadata }]
       })
     }
     waitForTurn()
@@ -329,8 +346,8 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     }).catch((cause: unknown) => { if (active.current === turn) fail(cause) })
   }, [connection, courseId, ensureSocket, fail, recoveryKey, sessionId, waitForTurn])
 
-  const startTurn = useCallback((body: Turn["body"], display?: string) => {
-    start({ id: crypto.randomUUID(), body, display, sequence: 0, sent: false }, false)
+  const startTurn = useCallback((body: Turn["body"], display?: string, requestId?: string) => {
+    start({ id: requestId ?? crypto.randomUUID(), body, display, sequence: 0, sent: false }, false)
   }, [start])
 
   const stop = useCallback(() => {
@@ -344,11 +361,12 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     finish(true, "Generation stopped.")
   }, [finish])
 
-  const sendMessage = useCallback(({ text, displayText, mode = "socratic", notebook }: ChatMessageRequest) => {
+  const sendMessage = useCallback(({ text, displayText, mode = "socratic", notebook, continuation }: ChatMessageRequest) => {
     const message = text.trim()
     if (!message) return
     const display = displayText?.trim() ? displayText.trim().slice(0, 500) : message
-    startTurn({ message, ...(displayText?.trim() ? { displayText: display } : {}), mode, ...(notebook ? { notebook } : {}) }, display)
+    startTurn({ message, ...(displayText?.trim() ? { displayText: display } : {}), mode, ...(notebook ? { notebook } : {}),
+      ...(continuation ? { continueCourseFrom: continuation.from } : {}) }, display, continuation?.requestId)
   }, [startTurn])
 
   const regenerate = useCallback(() => {
@@ -356,7 +374,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     if (!previous || active.current) return
     if (retryable.current) {
       start({ ...previous, sequence: 0, sent: false }, true)
-    } else if (!previous.body.action) {
+    } else if (!previous.body.action && !previous.body.continueCourseFrom) {
       startTurn(previous.body, previous.display)
     }
   }, [start, startTurn])

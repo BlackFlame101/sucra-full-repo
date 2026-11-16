@@ -13,7 +13,6 @@ import type { SelectionRequest } from "@/components/notebook/NoteEditor"
 import { notebookDraftKey } from "@/hooks/useNotebookAutosave"
 import { groupNotes, searchNotes, type Note, type NoteCourse, type NoteFilter } from "@/lib/notebook/notes"
 import { emptyNote } from "@/lib/notebook/document"
-import "katex/dist/katex.min.css"
 
 const filters: NoteFilter[] = ["All", "Courses", "Personal", "Starred"]
 

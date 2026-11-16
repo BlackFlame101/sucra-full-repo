@@ -162,11 +162,13 @@ class ExplanationSection(BaseModel):
     code: str = Field(default="", max_length=12000)
     code_language: str = Field(default="", max_length=32)
     walkthrough: list[dict[str, str]] = Field(default_factory=list, max_length=80)
+    citations: list[ExplanationCitation] | None = None
+    covers: list[str] | None = None
 
 
 class GeneratedExplanation(BaseModel):
-    definition: str = Field(min_length=10, max_length=3000)
-    intuition: str = Field(min_length=10, max_length=3000)
+    definition: str = Field(max_length=3000)
+    intuition: str = Field(max_length=3000)
     sections: list[ExplanationSection] = Field(min_length=1, max_length=30)
     course_example: str = Field(default="", max_length=3000)
     common_pitfalls: list[str] = Field(default_factory=list, max_length=8)
