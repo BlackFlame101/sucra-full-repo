@@ -7,19 +7,40 @@ import { codeCommentProse, codeLabel, guiInstructions, workflowMappingLines } fr
 import { Button } from "@/components/ui/button"
 import { lexStudyMarkdown, safeNoteLink } from "@/lib/notebook/document"
 
-export function StudyCopy({ value, label }: { value: string; label: string }) {
+export function StudyCopy({ value, label, french, selectFallback }: {
+  value: string; label: string; french?: boolean; selectFallback?: boolean
+}) {
   const [status, setStatus] = useState("")
-  return <Button type="button" size="sm" variant="ghost" onClick={async () => {
-    try { await navigator.clipboard.writeText(value); setStatus("Copied") }
-    catch { setStatus("Copy unavailable") }
+  const [selectText, setSelectText] = useState(false)
+  const button = <Button type="button" size="sm" variant="ghost" className={selectFallback ? "min-h-11" : undefined} onClick={async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setStatus(french ? "Copié" : "Copied")
+      if (selectText) setSelectText(false)
+    }
+    catch {
+      if (selectFallback) {
+        setSelectText(true)
+        setStatus(french ? "Copier le texte sélectionné" : "Copy the selected text")
+      } else setStatus(french ? "Copie indisponible" : "Copy unavailable")
+    }
   }}><span aria-live="polite">{status || label}</span></Button>
+  if (!selectText) return button
+  return <div className="min-w-0">{button}<textarea readOnly value={value}
+    aria-label={french ? "Texte à copier" : "Text to copy"} rows={3}
+    className="w-full min-w-0 rounded-md border p-2 text-sm focus-visible:outline-2 focus-visible:outline-ring"
+    ref={(element) => { element?.focus({ preventScroll: true }); element?.select() }} /></div>
 }
 
 export type StudyMarkdownPresentation = {
+  french?: boolean
+  selectCopyFallback?: boolean
   checklist?: (item: Tokens.ListItem) => { checked: boolean; toggle: (checked: boolean) => void } | undefined
   codeLineEnding?: "\r\n" | "\r"
   copyTables?: boolean
   metricSummary?: boolean
+  documentStyle?: boolean
+  citation?: (id: string) => { label: string; title: string; href?: string } | undefined
 }
 
 function render(tokens: Token[], inline = false, presentation?: StudyMarkdownPresentation): React.ReactNode {
@@ -29,6 +50,14 @@ function render(tokens: Token[], inline = false, presentation?: StudyMarkdownPre
     const children = () => renderChildren(t.tokens ?? [], true)
     switch (t.type) {
       case "space": return null
+      case "sourceCitation": {
+        const reference = presentation?.citation?.(t.citationId)
+        if (!reference) return <span key={key}>{t.raw}</span>
+        const style = "ms-1 inline-block whitespace-nowrap align-baseline text-xs font-medium text-secondary underline underline-offset-2"
+        return reference.href ? <a key={key} href={reference.href} className={style} title={reference.title}
+          target="_blank" rel="noopener noreferrer">{reference.label}</a>
+          : <span key={key} title={reference.title} className="ms-1 text-xs text-muted-foreground">{reference.label}</span>
+      }
       case "inlineMath": case "blockMath": {
         // KaTeX escapes input and runs with trust disabled.
         const displayMode = t.type === "blockMath"
@@ -42,6 +71,12 @@ function render(tokens: Token[], inline = false, presentation?: StudyMarkdownPre
           dangerouslySetInnerHTML={{ __html: katex.renderToString(t.latex, { displayMode, throwOnError: false, trust: false }) }} />
       }
       case "heading": {
+        if (presentation?.documentStyle) {
+          const Heading = (["h1", "h2", "h3", "h4", "h5", "h6"] as const)[Math.min(6, Math.max(1, t.depth)) - 1]
+          const typography = t.depth === 1 ? "text-3xl font-semibold sm:text-4xl" :
+            t.depth === 2 ? "pt-5 text-2xl font-semibold" : "pt-3 text-xl font-semibold"
+          return <Heading key={key} className={"font-serif leading-tight tracking-tight " + typography}>{children()}</Heading>
+        }
         const Heading = t.depth === 1 ? "h3" : t.depth === 2 ? "h4" : "h5"
         return <Heading key={key} className="font-serif text-lg font-semibold">{children()}</Heading>
       }
@@ -106,7 +141,10 @@ function render(tokens: Token[], inline = false, presentation?: StudyMarkdownPre
           {copy}
         </div>
       }
-      case "code": return <StudyCode key={key} value={presentation?.codeLineEnding ? t.text.replaceAll("\n", presentation.codeLineEnding) : t.text} language={t.lang} />
+      case "code": return <StudyCode key={key} value={presentation?.codeLineEnding ? t.text.replaceAll("\n", presentation.codeLineEnding) : t.text}
+        language={presentation?.documentStyle ? t.lang?.split(/\s+/)[0] : t.lang}
+        cellId={presentation?.documentStyle ? /(?:^|\s)cell:([a-f0-9]{24})(?:\s|$)/.exec(t.lang ?? "")?.[1] : undefined}
+        french={presentation?.french} selectCopyFallback={presentation?.selectCopyFallback} />
       case "image": case "escape": return <span key={key}>{t.text}</span>
       case "text": return t.tokens?.length ? <span key={key}>{renderChildren(t.tokens, true)}</span>
         : inline ? t.text : <span key={key}>{t.text}</span>
@@ -115,7 +153,9 @@ function render(tokens: Token[], inline = false, presentation?: StudyMarkdownPre
   })
 }
 
-export function StudyCode({ value, language }: { value: string; language?: string }) {
+export function StudyCode({ value, language, french, selectCopyFallback, cellId }: {
+  value: string; language?: string; french?: boolean; selectCopyFallback?: boolean; cellId?: string
+}) {
   const steps = guiInstructions(value)
   if (steps) return <ol className="list-decimal space-y-1 pl-5">{steps.map((step, index) =>
     <li key={index}>{step}</li>)}</ol>
@@ -131,9 +171,10 @@ export function StudyCode({ value, language }: { value: string; language?: strin
   if (plain && !shell) {
     return <pre tabIndex={0} className="min-w-0 overflow-x-auto whitespace-pre-wrap rounded-lg border bg-muted/50 p-3 text-sm">{value}</pre>
   }
-  return <div className="min-w-0 rounded-lg border bg-muted/50">
-    <div className="flex items-center justify-between gap-2 px-3 text-xs text-muted-foreground">
-      <span>{shell ? "Shell command" : codeLabel(language)}</span><StudyCopy value={value} label="Copy code" />
+  return <div className="min-w-0 rounded-lg border bg-muted/50" data-code-cell={cellId}>
+    <div className={`flex items-center justify-between gap-2 px-3 text-xs text-muted-foreground ${selectCopyFallback ? "flex-wrap" : ""}`}>
+      <span>{shell ? (french ? "Commande" : "Shell command") : codeLabel(language)}</span>
+      <StudyCopy value={value} label={french ? "Copier le code" : "Copy code"} french={french} selectFallback={selectCopyFallback} />
     </div>
     <pre tabIndex={0} className="overflow-x-auto whitespace-pre border-t p-3 font-mono text-sm leading-relaxed [overflow-wrap:normal] print:overflow-visible print:whitespace-pre-wrap print:[overflow-wrap:anywhere]"><code>{value}</code></pre>
   </div>
@@ -143,7 +184,8 @@ export const StudyMarkdown = memo(function StudyMarkdown({ content, tokens, pres
   content?: string; tokens?: Token[]; presentation?: StudyMarkdownPresentation
 }) {
   const body = useMemo(() => render(tokens ?? lexStudyMarkdown(content ?? ""), false, presentation), [content, tokens, presentation])
-  return <div className="min-w-0 space-y-3 [overflow-wrap:anywhere]">{body}</div>
+  return <div className={presentation?.documentStyle ? "min-w-0 space-y-5 leading-7 [overflow-wrap:anywhere]" :
+    "min-w-0 space-y-3 [overflow-wrap:anywhere]"}>{body}</div>
 })
 
 export const NotebookReply = memo(function NotebookReply({ content, streaming, partial }: {

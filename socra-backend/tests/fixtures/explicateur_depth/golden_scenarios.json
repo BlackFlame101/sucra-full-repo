@@ -1,0 +1,169 @@
+{
+  "review_method": "Read each answer against the manually authored items for its scenario. Record coverage, factual or mathematical errors, pedagogy and source scope separately. Course Map status, citations alone, and keyword matches do not earn coverage.",
+  "documents": {
+    "explainability": {
+      "filename": "Cours_Chapitre6_Explicabilite_Auditabilite.pdf",
+      "page_count": 35,
+      "document_parts": [
+        {
+          "id": "I",
+          "pages": [
+            5,
+            10
+          ],
+          "title": "Pourquoi expliquer un modèle ?"
+        },
+        {
+          "id": "II",
+          "pages": [
+            11,
+            22
+          ],
+          "title": "Expliquer un modèle après coup"
+        },
+        {
+          "id": "III",
+          "pages": [
+            23,
+            26
+          ],
+          "title": "Des modèles interprétables par nature"
+        },
+        {
+          "id": "IV",
+          "pages": [
+            27,
+            31
+          ],
+          "title": "Auditer un modèle"
+        }
+      ],
+      "front_matter_pages": [
+        1,
+        4
+      ],
+      "supplemental_pages": [
+        32,
+        35
+      ],
+      "scenarios": [
+        {
+          "id": "part_ii",
+          "prompt": "Explique intégralement la partie II, de II.1 à II.9, avec calculs, graphiques, exemples et limites. Indique ce qui reste à étudier.",
+          "pages": [
+            11,
+            22
+          ],
+          "must_teach": [
+            "II.1 p.12–13. Show baseline F1, shuffle one test column, rescore without retraining, and interpret mean F1 loss over repeated shuffles. Use montant (~0.59) and discuss correlated variables.",
+            "II.2 p.14. Explain why statut_enquete is unavailable at decision time. Bind the F1 increase 0.8669 → 0.9323 and permutation loss 0.754 to the correct experiment and label.",
+            "II.3 p.15–16. Explain marginal contributions averaged over feature orders, show both orders from coalition values 0.12, 0.55, 0.40, 0.89, derive 0.46 and 0.31, and verify their sum with the baseline. Keep this fictitious example separate from Mme Benali.",
+            "II.4 p.17. Walk through the waterfall from 0.116 to 0.924. Explain sign/color and why amount and night dominate this customer's decision.",
+            "II.5 p.18. Interpret the beeswarm's points, horizontal contribution and value colors. Explain high amount, low tenure and night using the 400-transaction plot.",
+            "II.6 p.19. Follow the four LIME steps (perturb, predict, weight, fit) and explain what the local surrogate coefficients mean.",
+            "II.7 p.20. Compare multiple seeds at 500 neighbors, show the tenure sign flip, and explain what repeating and increasing toward 2,000 neighbors can establish.",
+            "II.8–9 p.21–22. Compare guarantees, locality, stability and cost of SHAP and LIME. Explain correlation versus causality, shared importance, out-of-distribution perturbations and instability."
+          ]
+        },
+        {
+          "id": "part_iii",
+          "prompt": "Enseigne la partie III, avec le tableau des F1 et le compromis performance–interprétabilité.",
+          "pages": [
+            23,
+            26
+          ],
+          "must_teach": [
+            "III.1 p.24. Explain the log-odds equation, feature standardization and what the sign of each coefficient tells the reader.",
+            "III.1 p.24. Explain the log10(montant) transformation and attribute 0.7407 to raw-amount logistic regression and 0.8593 to log-amount logistic regression.",
+            "III.2 p.25. Follow Mme Benali's path: montant > 1,506, night, tenure ≤64, and a leaf with 98% fraud in training. Distinguish depth-3 F1 0.5737 from unrestricted-tree F1 0.7556.",
+            "III.3 p.24–26. Compare the five model scores with their labels, including random forest 0.8669. Quantify the log-logistic gap to the forest at 0.0076.",
+            "III.3 p.26. Explain why 114, 113 and 72 caught frauds out of 134 and the shared test split matter, how to choose the simplest adequate model, and why gains must exceed noise."
+          ]
+        },
+        {
+          "id": "part_iv_with_tp07",
+          "prompt": "Explique la partie IV sur l’auditabilité et les points de contrôle du TP07.",
+          "pages": [
+            [
+              27,
+              31
+            ],
+            [
+              33,
+              33
+            ]
+          ],
+          "must_teach": [
+            "IV.1 p.28. Reconstruct the contested 0.924 decision from actual logged inputs, DVC data version, Git code commit and the exact MLflow model version.",
+            "IV.2 p.29. Connect DVC fingerprints, MLflow experiments/registry, SHAP/LIME artifacts and the Model Card. Explain which audit question each answers.",
+            "IV.3 p.30. Explain what journaliser.py logs (model version/run ID, data fingerprint, F1/recall, figures and Model Card) and why the artifacts are tied to the version.",
+            "IV.4 p.31. Explain the Model Card through its fraud-model purpose, data/metrics, limitations, and monitoring or audit documentation.",
+            "TP07 p.33. Map activities 1–7 and preserve the checkpoints: forest F1 0.8669, Benali P 0.924, SHAP base plus contributions, log-logistic F1 0.8593."
+          ]
+        },
+        {
+          "id": "whole_document",
+          "prompt": "Enseigne tout le cours dans l’ordre, avec ses calculs, graphiques et exemples, et indique toute matière restant à traiter.",
+          "pages": [
+            1,
+            35
+          ],
+          "also_requires": [
+            "part_ii",
+            "part_iii",
+            "part_iv_with_tp07"
+          ],
+          "must_teach": [
+            "p.1–5. Explain the chapter's objectives and how the fraud case connects model explanations to the deployment workflow.",
+            "I.1 p.6. Teach the 1,800 MAD transaction case, 0.5 threshold and 0.924 prediction, and why the score cannot answer the customer's question.",
+            "I.2–3 p.7–8. Distinguish justification, debugging, trust and audit, and present the transparency material as described by the course.",
+            "I.4–5 p.9–10. Distinguish transparent and post-hoc models, and global and local explanations using the source's examples.",
+            "p.32–35. Connect glossary, TP07 and recap to the learning sequence. While incomplete, identify remaining or insufficiently explained material by section/page and avoid claiming completion."
+          ]
+        }
+      ]
+    },
+    "orange_knime": {
+      "filename": "TP_Complementaire_Orange_KNIME.pdf",
+      "page_count": 15,
+      "scenarios": [
+        {
+          "id": "full_required_lab",
+          "prompt": "Guide-moi dans tout le TP Orange et KNIME, avec commandes, réglages, points de contrôle, captures et livrables obligatoires.",
+          "pages": [
+            1,
+            15
+          ],
+          "must_teach": [
+            "p.1–3. Walk through the workspace, PowerShell folders/copy/line count, Orange and KNIME setup, and the dataset inputs and fraud target. Use Annex A only if the source CSV is missing.",
+            "p.3–4. Set up the Orange canvas, load the CSV and assign fraude the categorical target role without silently dropping input variables.",
+            "p.5–6. Give the stratified reproducible 75:25 split, both Test and Score port links, five learners, random forest reproducibility, and test data/class 1 selection.",
+            "p.6–8. Read the baseline metrics and confusion matrix, configure Normalize Features, compare the resulting scores, and save the classifier and Orange workflow at their specified names.",
+            "p.8–11. Build the KNIME CSV Reader → Number to String → Table Partitioner flow and each learner/predictor/scorer branch with the correct links, seed settings, and target columns.",
+            "p.10–12. Verify 3,750/1,250 rows, 426/142 frauds, prediction column and class-1 metrics, diagnose wrong ports/categorical targets, and export tp-fraude.knwf.",
+            "p.12–14. Create reports/comparatif.md with the required before/after and KNIME comparisons, distinguish the differing FLAML test split, and guide all six mandatory analysis questions.",
+            "p.3–14. Identify the five mandatory student screenshot checkpoints at the point of action, distinguish reference illustrations and optional bonus screenshots, and list the final report and workflow deliverables."
+          ]
+        }
+      ]
+    },
+    "dependent_exercises": {
+      "filename": "dependent_exercise_sheet.txt",
+      "source": "Hand-authored offline fixture",
+      "scenarios": [
+        {
+          "id": "solve_exercises_1_and_2",
+          "prompt": "Résous chaque sous-question des exercices 1 et 2 dans l'ordre et saute l'exercice 3.",
+          "must_teach": [
+            "1(a). Solve y(2) = 7 for a = 3 with y = ax + 1.",
+            "1(b). Reuse a = 3 from 1(a) to get y(5) = 16.",
+            "1(c). Reuse a = 3 to solve y = 10 for x = 3 and check 3 × 3 + 1 = 10.",
+            "2(a). Use the result y(5) = 16 from 1(b) to compute the 25% increase, 4.",
+            "2(b). Reuse 2(a) to give the new total, 20, with a 16 × 1.25 cross-check.",
+            "Exercise 3 remains out of scope; present no solution to it."
+          ]
+        }
+      ]
+    }
+  }
+}

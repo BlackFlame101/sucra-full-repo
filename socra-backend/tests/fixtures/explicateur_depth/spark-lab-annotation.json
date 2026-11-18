@@ -1,0 +1,826 @@
+{
+  "schema_version": 1,
+  "document_id": "spark",
+  "filename": "TP4_Spark_MLlib.pdf",
+  "sha256": "3203a05e7a063c3a4e9d04894e035cca7541342b694dafa2fb4c73b4d7ed4fe8",
+  "page_count": 9,
+  "annotation_basis": "Rendered pages 1–3 plus exact indexed spans. Intentional one-to-many and many-to-one mappings account for code wrapping and compound prose. An item must reference all annotated excerpts to cover a requirement.",
+  "scope_note": "Global prerequisites and subsequent steps are context. The target and predictor names can be checked against Step 1 target and Step 4 features. The numbered shells in Step 0 and Step 2 code are grouped by educational purpose.",
+  "units": [
+    {
+      "unit_id": "1bdc21d0051d0263680524fd",
+      "label": "Étape 0",
+      "title": "Vérifier l’environnement",
+      "actual_source_pages": [
+        1
+      ],
+      "unit_map_start": [
+        1,
+        1787
+      ],
+      "unit_map_end": [
+        2,
+        162
+      ],
+      "expected_packet_count": 1,
+      "block_kinds": [
+        "action",
+        "command_or_ui",
+        "expected_result",
+        "checkpoint"
+      ],
+      "requirements": [
+        {
+          "id": "spark-00-python-interpreter",
+          "requirement": "Use the current Python executable for both PySpark environment settings.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 1917,
+              "end": 1962,
+              "quote": "os.environ[\"PYSPARK_PYTHON\"] = sys.executable"
+            },
+            {
+              "page": 1,
+              "start": 1963,
+              "end": 2015,
+              "quote": "os.environ[\"PYSPARK_DRIVER_PYTHON\"] = sys.executable"
+            }
+          ],
+          "candidate_ids": [
+            "fcd8423f1457d470ec35e412721a272063da42791c23e484f0d3a213d84da942"
+          ]
+        },
+        {
+          "id": "spark-00-imports",
+          "requirement": "Import the Spark SQL and ML components shown, including the stated alias and transformers.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2016,
+              "end": 2068,
+              "quote": "from pyspark.sql import SparkSession, functions as F"
+            },
+            {
+              "page": 1,
+              "start": 2069,
+              "end": 2115,
+              "quote": "from pyspark.ml import Pipeline, PipelineModel"
+            },
+            {
+              "page": 1,
+              "start": 2116,
+              "end": 2178,
+              "quote": "from pyspark.ml.feature import VectorAssembler, StandardScaler"
+            }
+          ],
+          "candidate_ids": [
+            "fcd8423f1457d470ec35e412721a272063da42791c23e484f0d3a213d84da942"
+          ]
+        },
+        {
+          "id": "spark-00-local-master",
+          "requirement": "Configure the session to use local[2].",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2209,
+              "end": 2228,
+              "quote": ".master(\"local[2]\")"
+            }
+          ],
+          "candidate_ids": [
+            "befebfb9a7a26aee7500f981b589a2e39789e8aabb5a291582da0cfbf0ae9af9"
+          ]
+        },
+        {
+          "id": "spark-00-application-name",
+          "requirement": "Preserve the application name used in the notebook example.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2229,
+              "end": 2259,
+              "quote": ".appName(\"TP3_MLlib_VersionB\")"
+            }
+          ],
+          "candidate_ids": [
+            "85bb431273143e1377d4703f6e5c26cbfe11705ff11448fc6aeba113aae2c826"
+          ]
+        },
+        {
+          "id": "spark-00-session",
+          "requirement": "Create or obtain the Spark session and bind it as spark.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2179,
+              "end": 2208,
+              "quote": "spark = (SparkSession.builder"
+            },
+            {
+              "page": 1,
+              "start": 2260,
+              "end": 2275,
+              "quote": ".getOrCreate())"
+            }
+          ],
+          "candidate_ids": [
+            "fcd8423f1457d470ec35e412721a272063da42791c23e484f0d3a213d84da942",
+            "8da9880388470522a8f2b579c77f13f2e0e7cab578c8b83f624043264342f0b4"
+          ]
+        },
+        {
+          "id": "spark-00-log-level",
+          "requirement": "Set the Spark context log level to WARN.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2276,
+              "end": 2314,
+              "quote": "spark.sparkContext.setLogLevel(\"WARN\")"
+            }
+          ],
+          "candidate_ids": [
+            "8da9880388470522a8f2b579c77f13f2e0e7cab578c8b83f624043264342f0b4"
+          ]
+        },
+        {
+          "id": "spark-00-version-check",
+          "requirement": "Print the Spark version from the session. The version value is observed at runtime.",
+          "category": "runtime_output",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2315,
+              "end": 2354,
+              "quote": "print(\"Version Spark :\", spark.version)"
+            }
+          ],
+          "candidate_ids": [
+            "8da9880388470522a8f2b579c77f13f2e0e7cab578c8b83f624043264342f0b4"
+          ]
+        },
+        {
+          "id": "spark-00-threads",
+          "requirement": "Explain that local[2] uses two threads on the local machine.",
+          "category": "numeric_literal",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2356,
+              "end": 2416,
+              "quote": "En mode local[2], Spark utilise deux threads sur la machine."
+            }
+          ],
+          "candidate_ids": [
+            "827e8fae9c135d028d7ccaee2969a943cd17e461deca20c3a15520b4a8d29408"
+          ]
+        },
+        {
+          "id": "spark-00-cluster-limit",
+          "requirement": "Explain why local teaching runs do not establish distributed cluster performance.",
+          "category": "concept",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 1,
+              "start": 2480,
+              "end": 2547,
+              "quote": "permet pas de conclure sur les performances d’un cluster distribué."
+            }
+          ],
+          "candidate_ids": [
+            "827e8fae9c135d028d7ccaee2969a943cd17e461deca20c3a15520b4a8d29408"
+          ]
+        }
+      ],
+      "non_requirement_candidates": [
+        {
+          "candidate_id": "049bbbb61f5815c46edf60805c4db42b84191c7bf0d094ae83e9b2f98ca5aa85",
+          "text": "Objectif : démarrer une session Spark locale et vérifier la version utilisée.",
+          "evidence": [
+            {
+              "page": 1,
+              "start": 1823,
+              "end": 1900,
+              "quote": "Objectif : démarrer une session Spark locale et vérifier la version utilisée."
+            }
+          ],
+          "classification": "supporting_objective",
+          "reason": "The objective restates session startup and version verification, already grounded in the actual commands.",
+          "is_false_positive": false,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        },
+        {
+          "candidate_id": "0df82b71697155738645a3799d3fe42cf89bf08452503688f6522ec65f607963",
+          "text": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi",
+          "evidence": [
+            {
+              "page": 2,
+              "start": 0,
+              "end": 69,
+              "quote": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi"
+            }
+          ],
+          "classification": "running_header",
+          "reason": "Recurring top margin with class, course and author. It carries no lab instruction.",
+          "is_false_positive": true,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        },
+        {
+          "candidate_id": "0478df0b0165e767e32e19f45f43b47678be2d14f2b5b3daa5be30eefba23d70",
+          "text": "TP Spark MLlib –Par Pt Boubker Sbihi",
+          "evidence": [
+            {
+              "page": 2,
+              "start": 71,
+              "end": 107,
+              "quote": "TP Spark MLlib –Par Pt Boubker Sbihi"
+            }
+          ],
+          "classification": "running_footer",
+          "reason": "Recurring lower margin attribution. Text extraction places it before the page body.",
+          "is_false_positive": true,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        },
+        {
+          "candidate_id": "e8c4a59ffd9e5923173696cbdb190c6d4276b47154dc36b09e4c7a205690d396",
+          "text": "PARTIE 1 – Classification de transactions bancaires",
+          "evidence": [
+            {
+              "page": 2,
+              "start": 109,
+              "end": 160,
+              "quote": "PARTIE 1 – Classification de transactions bancaires"
+            }
+          ],
+          "classification": "section_transition",
+          "reason": "Part 1 heading introduces the next section on page 2 and assigns no Step 0 work.",
+          "is_false_positive": true,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        }
+      ]
+    },
+    {
+      "unit_id": "82fb4dd23705f19401132aca",
+      "label": "Étape 2",
+      "title": "Lire le JSON avec un schéma explicite",
+      "actual_source_pages": [
+        2,
+        3
+      ],
+      "unit_map_start": [
+        2,
+        1326
+      ],
+      "unit_map_end": [
+        3,
+        507
+      ],
+      "expected_packet_count": 2,
+      "block_kinds": [
+        "action",
+        "command_or_ui",
+        "expected_result",
+        "checkpoint"
+      ],
+      "requirements": [
+        {
+          "id": "spark-02-schema-import",
+          "requirement": "Import StructType, StructField and the three data types used in the schema.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1474,
+              "end": 1505,
+              "quote": "from pyspark.sql.types import ("
+            },
+            {
+              "page": 2,
+              "start": 1506,
+              "end": 1564,
+              "quote": "StructType, StructField, LongType, IntegerType, DoubleType"
+            }
+          ],
+          "candidate_ids": [
+            "2487968659325897ce131e2fb4e94e3a20294ae17ba8469ffdb0246f11a034fb",
+            "8627b2da65c7f1eb6bf9ad191436037e6b003aee4fbd79315f7ff72f1abc727e"
+          ]
+        },
+        {
+          "id": "spark-02-transaction-field",
+          "requirement": "Declare id_transaction as LongType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1592,
+              "end": 1640,
+              "quote": "StructField(\"id_transaction\", LongType(), True),"
+            }
+          ],
+          "candidate_ids": [
+            "79756718f3ce2f58deb8b5dc39de30287b8dc342f1e7c972c0bc223949171296"
+          ]
+        },
+        {
+          "id": "spark-02-amount-field",
+          "requirement": "Declare montant as DoubleType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1641,
+              "end": 1684,
+              "quote": "StructField(\"montant\", DoubleType(), True),"
+            }
+          ],
+          "candidate_ids": [
+            "fcd195c2072a5762c37ba6ae702517be1489fe939989510e92db6f841f63d656"
+          ]
+        },
+        {
+          "id": "spark-02-hour-field",
+          "requirement": "Declare heure as IntegerType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1685,
+              "end": 1727,
+              "quote": "StructField(\"heure\", IntegerType(), True),"
+            }
+          ],
+          "candidate_ids": [
+            "08a467e35885f27a55244a3ad315d37fda783519e89f94eaac9627ad6352b3bb"
+          ]
+        },
+        {
+          "id": "spark-02-foreign-field",
+          "requirement": "Declare pays_different as IntegerType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1728,
+              "end": 1779,
+              "quote": "StructField(\"pays_different\", IntegerType(), True),"
+            }
+          ],
+          "candidate_ids": [
+            "2ce7dba7861fd363cea87d261e08b0de7fbd0b0009a445e9bee0b9df586ad38f"
+          ]
+        },
+        {
+          "id": "spark-02-attempts-field",
+          "requirement": "Declare nb_tentatives as IntegerType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1780,
+              "end": 1830,
+              "quote": "StructField(\"nb_tentatives\", IntegerType(), True),"
+            }
+          ],
+          "candidate_ids": [
+            "33cec50f08591c8b9587ca7061f7ab13033ca852a7fe1d5eb07c615f2ef8370b"
+          ]
+        },
+        {
+          "id": "spark-02-fraud-field",
+          "requirement": "Declare fraude as DoubleType and nullable.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1831,
+              "end": 1872,
+              "quote": "StructField(\"fraude\", DoubleType(), True)"
+            }
+          ],
+          "candidate_ids": [
+            "3dd39b9e76ccb8187416a8f1d891561ab7eee56efa457431b2fc775f10990c80"
+          ]
+        },
+        {
+          "id": "spark-02-read-with-schema",
+          "requirement": "Build schema_tx and apply it on the JSON reader using the resolved file path. Bind the result as transactions_brutes.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1567,
+              "end": 1591,
+              "quote": "schema_tx = StructType(["
+            },
+            {
+              "page": 2,
+              "start": 1876,
+              "end": 1899,
+              "quote": "transactions_brutes = ("
+            },
+            {
+              "page": 2,
+              "start": 1900,
+              "end": 1928,
+              "quote": "spark.read.schema(schema_tx)"
+            },
+            {
+              "page": 2,
+              "start": 1929,
+              "end": 1962,
+              "quote": ".json(str(chemin_json.resolve()))"
+            }
+          ],
+          "candidate_ids": [
+            "b21b09f8a7c127d0250dacbcb2341eeb22b6beb8690ef174c8aabc0df546d11e",
+            "4162dbb0251f110b93411feada84fcb830dd0952fc9dade79b2030e933184da3",
+            "cd8a0ffa1cf98fb1f19eee5a8da54fb6eaa34e4bfa36d6d8d23e483ea9ce173a"
+          ]
+        },
+        {
+          "id": "spark-02-print-schema",
+          "requirement": "Print the loaded schema to inspect types and nullability.",
+          "category": "runtime_output",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1965,
+              "end": 1998,
+              "quote": "transactions_brutes.printSchema()"
+            }
+          ],
+          "candidate_ids": [
+            "610781b5c64ccccb6dd2e278c0176acc7160478c6f61a05b6c09626061d3e511"
+          ]
+        },
+        {
+          "id": "spark-02-preview-five",
+          "requirement": "Show five rows without truncating their displayed values.",
+          "category": "numeric_literal",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1999,
+              "end": 2042,
+              "quote": "transactions_brutes.show(5, truncate=False)"
+            }
+          ],
+          "candidate_ids": [
+            "610781b5c64ccccb6dd2e278c0176acc7160478c6f61a05b6c09626061d3e511"
+          ]
+        },
+        {
+          "id": "spark-02-count-total",
+          "requirement": "Print the total row count. The displayed result is a runtime observation.",
+          "category": "runtime_output",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 2043,
+              "end": 2105,
+              "quote": "print(\"Nombre de transactions :\", transactions_brutes.count())"
+            }
+          ],
+          "candidate_ids": [
+            "610781b5c64ccccb6dd2e278c0176acc7160478c6f61a05b6c09626061d3e511"
+          ]
+        },
+        {
+          "id": "spark-02-count-by-class",
+          "requirement": "Group by fraude, count the rows and show the resulting counts. Class totals need runtime evidence.",
+          "category": "runtime_output",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 2,
+              "start": 2106,
+              "end": 2158,
+              "quote": "transactions_brutes.groupBy(\"fraude\").count().show()"
+            }
+          ],
+          "candidate_ids": [
+            "610781b5c64ccccb6dd2e278c0176acc7160478c6f61a05b6c09626061d3e511"
+          ]
+        },
+        {
+          "id": "spark-02-json-lines",
+          "requirement": "Explain why a JSON Lines record can be read one line at a time.",
+          "category": "concept",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 3,
+              "start": 122,
+              "end": 197,
+              "quote": "Pourquoi le format JSON Lines est-il adapté à une lecture ligne par ligne ?"
+            },
+            {
+              "page": 3,
+              "start": 374,
+              "end": 418,
+              "quote": "JSON Lines contient un objet JSON par ligne."
+            }
+          ],
+          "candidate_ids": [
+            "19ec9bd3ae394a80c53d8cfe8295fa486aa52075b7092bf9f79b43663a5781fd",
+            "ff7ce4a68b5e4ce144f2eb80720ffc7c4e8525f0996745d5d78fd849ecee663d"
+          ]
+        },
+        {
+          "id": "spark-02-multiline-json",
+          "requirement": "Distinguish a multi-line JSON array from JSON Lines and test multiLine=True for that file shape.",
+          "category": "procedure",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 3,
+              "start": 239,
+              "end": 267,
+              "quote": "un tableau JSON multiligne ?"
+            },
+            {
+              "page": 3,
+              "start": 481,
+              "end": 505,
+              "quote": "l’option multiLine=True."
+            }
+          ],
+          "candidate_ids": [
+            "19ec9bd3ae394a80c53d8cfe8295fa486aa52075b7092bf9f79b43663a5781fd",
+            "ff7ce4a68b5e4ce144f2eb80720ffc7c4e8525f0996745d5d78fd849ecee663d"
+          ]
+        },
+        {
+          "id": "spark-02-schema-rationale",
+          "requirement": "Explain the purpose of an explicit schema for controlling column types.",
+          "category": "concept",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 3,
+              "start": 268,
+              "end": 308,
+              "quote": "Quel est l’intérêt du schéma explicite ?"
+            }
+          ],
+          "candidate_ids": [
+            "19ec9bd3ae394a80c53d8cfe8295fa486aa52075b7092bf9f79b43663a5781fd"
+          ]
+        },
+        {
+          "id": "spark-02-target-and-features",
+          "requirement": "Identify fraude as the target, distinguish id_transaction as an identifier and identify the explanatory variables.",
+          "category": "concept",
+          "mandatory": true,
+          "block_kinds": [
+            "action",
+            "command_or_ui",
+            "expected_result",
+            "checkpoint"
+          ],
+          "evidence": [
+            {
+              "page": 3,
+              "start": 309,
+              "end": 359,
+              "quote": "Identifier la cible et les variables explicatives."
+            }
+          ],
+          "candidate_ids": [
+            "19ec9bd3ae394a80c53d8cfe8295fa486aa52075b7092bf9f79b43663a5781fd"
+          ]
+        }
+      ],
+      "non_requirement_candidates": [
+        {
+          "candidate_id": "72fbd84380031427c2769789d40853c6347ef2c78e4667111ab6a06e0e04ac2b",
+          "text": "Objectif : charger les transactions dans un DataFrame Spark en contrôlant les types des colonnes.",
+          "evidence": [
+            {
+              "page": 2,
+              "start": 1375,
+              "end": 1472,
+              "quote": "Objectif : charger les transactions dans un DataFrame Spark en contrôlant les types des colonnes."
+            }
+          ],
+          "classification": "supporting_objective",
+          "reason": "The objective restates loading a DataFrame with controlled column types. The instructions and analysis question are scored independently.",
+          "is_false_positive": false,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        },
+        {
+          "candidate_id": "8327bc9e1e3c3f337f926790d5314c757c8843c44e3f74d8125cfd802dcc6824",
+          "text": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi",
+          "evidence": [
+            {
+              "page": 3,
+              "start": 0,
+              "end": 69,
+              "quote": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi"
+            }
+          ],
+          "classification": "running_header",
+          "reason": "Recurring top margin with class, course and author. It appears ahead of the continuation on page 3.",
+          "is_false_positive": true,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        },
+        {
+          "candidate_id": "4f437bcfd443a1342ec6d15345d6d33d85f66ae3f0cdb02957a0bde524105bb0",
+          "text": "TP Spark MLlib –Par Pt Boubker Sbihi",
+          "evidence": [
+            {
+              "page": 3,
+              "start": 71,
+              "end": 107,
+              "quote": "TP Spark MLlib –Par Pt Boubker Sbihi"
+            }
+          ],
+          "classification": "running_footer",
+          "reason": "Recurring lower margin attribution. Extracted ahead of the page 3 analysis despite sitting below the body.",
+          "is_false_positive": true,
+          "actual_type": "command",
+          "actual_importance": "essential"
+        }
+      ]
+    }
+  ]
+}

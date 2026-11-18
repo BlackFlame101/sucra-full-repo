@@ -1,7 +1,7 @@
 "use client"
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type MouseEvent } from "react"
-import { Bookmark, MoreVertical, NotebookPen, RotateCcw, ArrowDown, PanelRightClose, PanelRightOpen } from "lucide-react"
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react"
+import { Bookmark, NotebookPen, RotateCcw, ArrowDown, PanelRightClose, PanelRightOpen } from "lucide-react"
 import type { CaptureTarget } from "@/components/notebook/SaveResponseDialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,7 +17,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { LearningMode, PublicCorrection, PublicExercise, PublicExplanation, PublicSolution } from "@/lib/socra-ws"
+import { isEducationalDocument } from "@/lib/educational-document"
+import type { LearningMode, PublicCorrection, PublicExercise, ExplanationPayload, PublicSolution } from "@/lib/socra-ws"
+import { supportedUnitActions, type ExplanationTurn, type UnitAction } from "@/lib/explanation-v2"
+import { LiveExplanation } from "@/components/chat/LiveExplanation"
+import type { CourseContextMaterial } from "@/components/context-panel/ContextPanel"
 import type { UIMessage } from "ai"
 
 interface ChatPanelProps {
@@ -45,10 +49,13 @@ interface ChatPanelProps {
   correction: PublicCorrection | null
   solution: PublicSolution | null
   onRevealSolution: () => void
-  explanation: PublicExplanation | null
+  explanation: ExplanationPayload | null
   onDiscussExplanation: (question: string) => void
   onContinueCourse: (from: string, requestId: string, label: string) => void
-  onSaveExplanationToLibrary: (explanation: PublicExplanation, messageId: string) => void
+  onUnitAction?: (from: string, action: UnitAction, label: string) => void
+  explanationTurns?: ReadonlyMap<string, ExplanationTurn>
+  courseMaterials?: CourseContextMaterial[]
+  onSaveExplanationToLibrary: (explanation: ExplanationPayload, messageId: string) => void
   explanationOwnerId?: string
   onCaptureResponse: (target: CaptureTarget) => void
   sourceMessageId?: string | null
@@ -89,6 +96,9 @@ export function ChatPanel({
   explanation,
   onDiscussExplanation,
   onContinueCourse,
+  onUnitAction,
+  explanationTurns,
+  courseMaterials,
   onSaveExplanationToLibrary,
   explanationOwnerId,
   onCaptureResponse,
@@ -113,10 +123,38 @@ export function ChatPanel({
   })
   const courseMessages = new Map<string, string>()
   for (const message of messages) {
-    const metadata = message.metadata as { persisted?: boolean; explanation?: PublicExplanation } | undefined
-    const requestId = metadata?.explanation?.course_progress?.request_id
+    const metadata = message.metadata as { persisted?: boolean; explanation?: ExplanationPayload } | undefined
+    const requestId = !isEducationalDocument(metadata?.explanation) ? metadata?.explanation?.course_progress?.request_id : undefined
     if (metadata?.persisted && requestId) courseMessages.set(requestId, message.id)
   }
+  const latestByDocument = useMemo(() => {
+    const result = new Map<string, string>()
+    for (const [request, turn] of explanationTurns ?? []) {
+      const source = turn.saved?.course_progress?.document_id
+      if (source && !turn.saved?.historical_source) result.set(source, request)
+    }
+    return result
+  }, [explanationTurns])
+  const last = messages.at(-1)
+  const active = (status === "streaming" || status === "submitted") && last?.role === "assistant"
+    ? last.metadata as { request_id?: string; unitActionFrom?: string } | undefined : undefined
+  const activeTurn = active?.request_id ? explanationTurns?.get(active.request_id) : undefined
+  const attachedRun = active?.unitActionFrom ? explanationTurns?.get(active.unitActionFrom) : undefined
+  const superseded = useMemo(() => {
+    const prior = new Set<string>()
+    for (const [id, turn] of explanationTurns ?? []) {
+      const card = turn.saved
+      if (!card) continue
+      if (supportedUnitActions(card).some((action) => {
+        const child = explanationTurns?.get(action.request_id)?.saved
+        return child && !child.historical_source && child.course_progress?.document_id === card.course_progress?.document_id
+          && child.course_progress?.index_generation === card.course_progress?.index_generation
+          && child.course_progress?.source_hash === card.course_progress?.source_hash
+      })) prior.add(id)
+    }
+    return prior
+  }, [explanationTurns])
+  const usedUnitRequests = new Set(courseMessages.keys())
 
   useEffect(() => {
     const viewport = scrollAreaRef.current
@@ -173,7 +211,7 @@ export function ChatPanel({
       isNearBottomRef.current = true
     })
     return () => cancelAnimationFrame(frame)
-  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation?.check_question, sourceMessageId])
+  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation, sourceMessageId])
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -218,9 +256,6 @@ export function ChatPanel({
             <Bookmark className={`h-4 w-4 ${sessionSavedToLibrary ? "fill-current text-secondary" : ""}`} />
             <span>{savingSessionToLibrary ? "Saving…" : sessionSavedToLibrary ? "Saved" : "Save"}</span>
           </Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground">
-            <MoreVertical className="h-4 w-4" />
-          </Button>
           <Button type="button" variant="outline" size="icon" className="h-8 w-8 shrink-0" ref={contextToggleRef} onClick={onToggleContext} aria-expanded={contextOpen} aria-controls="inquiry-context" aria-label={contextOpen ? "Hide course context" : "Show course context"} title={contextOpen ? "Hide course context" : "Show course context"}>
             {contextOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
           </Button>
@@ -237,12 +272,25 @@ export function ChatPanel({
             status={status}
             progress={progress}
             renderAfterMessage={(message) => {
-              if (message.role !== "assistant") return null
               const metadata = (message as UIMessage & { metadata?: Record<string, unknown> }).metadata
+              const turn = typeof metadata?.request_id === "string" ? explanationTurns?.get(metadata.request_id) : undefined
+              if (message.role !== "assistant") return turn && !turn.messageId && !turn.saved
+                ? <LiveExplanation turn={turn} french={language === "fr"} /> : null
               const messageExercise = metadata?.exercise as PublicExercise | undefined
               const messageCorrection = metadata?.correction as PublicCorrection | undefined
-              const messageExplanation = metadata?.explanation as PublicExplanation | undefined
-              const courseProgress = messageExplanation?.course_progress
+              const messageExplanation = metadata?.explanation as ExplanationPayload | undefined
+              const courseProgress = isEducationalDocument(messageExplanation) ? undefined : messageExplanation?.course_progress
+              const request = courseProgress?.request_id
+              const structured = request ? explanationTurns?.get(request)?.saved : undefined
+              const documentId = structured?.course_progress?.document_id
+              const material = documentId ? courseMaterials?.find((item) => item.documentId === documentId) : undefined
+              const previous = []
+              if (documentId && request === latestByDocument.get(documentId)) {
+                for (const [earlierRequest, turn] of explanationTurns ?? []) {
+                  if (earlierRequest === request) break
+                  if (!turn.saved?.historical_source) previous.push(...turn.stream.versions)
+                }
+              }
               const previousParts = courseProgress?.generated_parts?.flatMap(({ part, request_id }) => {
                 const messageId = request_id && courseMessages.get(request_id)
                 return messageId && part !== courseProgress.part ? [{ part, messageId }] : []
@@ -258,23 +306,36 @@ export function ChatPanel({
               const captureAction = canCapture ? {
                 onPointerDown: () => { captureSelection.current = selectedText() },
                 onClick: (event: MouseEvent<HTMLButtonElement>) => {
-                  onCaptureResponse({ messageId: message.id, title: messageExplanation?.sections?.[0]?.heading ||
+                  onCaptureResponse({ messageId: message.id, title: (isEducationalDocument(messageExplanation)
+                    ? messageExplanation.title : messageExplanation?.sections?.[0]?.heading) ||
                     (messageCorrection ? "Exercise feedback" : sessionTitle), selection: (event.detail ? captureSelection.current : "") || selectedText() })
                   captureSelection.current = ""
                 },
               } : undefined
-              return (
-                <div className="flex w-full min-w-0 max-w-full flex-col gap-4">
-                  {messageExercise && <ExerciseCard key={messageExercise.id} exercise={messageExercise} onNextExercise={onNextExercise} onSubmitAttempt={onSubmitAttempt} disabled={status !== "ready"} submissionLocked={solution?.exercise_id === messageExercise.id} />}
-                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} disabled={status !== "ready"} />}
-                  {messageExplanation && <ExplanationCard explanation={messageExplanation} ownerId={explanationOwnerId}
+              const card = messageExplanation && <ExplanationCard explanation={messageExplanation} ownerId={explanationOwnerId}
                     explanationId={metadata?.persisted === true ? message.id : undefined}
                     onDiscuss={onDiscussExplanation}
                     onContinueCourse={metadata?.persisted && courseProgress?.next_request_id &&
                       !courseMessages.has(courseProgress.next_request_id) ? onContinueCourse : undefined}
+                    onUnitAction={metadata?.persisted === true && documentId &&
+                      request === latestByDocument.get(documentId) ? onUnitAction : undefined}
+                    usedUnitRequests={usedUnitRequests}
+                    unitContext={structured ? { previous, turn, live: request === active?.unitActionFrom ? activeTurn : undefined,
+                      source: material ? { title: material.summary?.title || material.filename } : undefined } : undefined}
                     coursePartLinks={previousParts}
                     onSaveToLibrary={metadata?.persisted ? (value) => onSaveExplanationToLibrary(value, message.id) : undefined}
-                    notebookCapture={captureAction} disabled={status !== "ready"} />}
+                    notebookCapture={captureAction} disabled={status !== "ready" && status !== "error"} />
+              return (
+                <div className="flex w-full min-w-0 max-w-full flex-col gap-4">
+                  {messageExercise && <ExerciseCard key={messageExercise.id} exercise={messageExercise} onNextExercise={onNextExercise} onSubmitAttempt={onSubmitAttempt} disabled={status !== "ready"} submissionLocked={solution?.exercise_id === messageExercise.id} />}
+                  {messageCorrection && <ExerciseFeedbackCard correction={messageCorrection} solution={solution} onRevealSolution={onRevealSolution} onNextExercise={onNextExercise} onSaveToLibrary={onSaveExerciseToLibrary} disabled={status !== "ready"} />}
+                  {request && superseded.has(request) ? <details className="min-w-0">
+                    <summary className="min-h-11 cursor-pointer py-2 text-sm focus-visible:outline-2 focus-visible:outline-ring">
+                      {language === "fr" ? "Explication précédente" : "Earlier explanation"}
+                    </summary>{card}
+                  </details> : card}
+                  {!messageExplanation && turn && !(turn === activeTurn && attachedRun?.saved && attachedRun.messageId) &&
+                    <LiveExplanation turn={turn} french={language === "fr"} />}
                   {!messageExplanation && captureAction && <Button type="button" variant="ghost" size="sm"
                     className="self-start text-muted-foreground" {...captureAction}><NotebookPen />Save to Notebook</Button>}
                 </div>

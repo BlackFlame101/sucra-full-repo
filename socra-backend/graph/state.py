@@ -112,6 +112,11 @@ class SocraState(TypedDict, total=False):
     explain_language_explicit: bool
     explain_document_id: str
     explain_course_prior: dict
+    explain_checkpoint: Any
+    explain_unit_event: Callable[[str, Any], Awaitable[None]]
+    explain_document_event: Callable[[str, Any], Awaitable[None]]
+    explain_unit_action: str
+    explain_target_unit: str
     explain_inventory: dict[str, Any]
     explain_evidence_chunk_ids: list[str]
     mode: Literal["socratic", "exercise", "explain", "correct"]

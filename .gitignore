@@ -1,9 +1,26 @@
 # Local documentation and database files
 *.[mM][dD]
 *.[sS][qQ][lL]
-/supabase/
+/supabase/*
+!/supabase/migrations/
+/supabase/migrations/*
+!/supabase/migrations/20261113135000_chat_turns.sql
+!/supabase/migrations/20261113140000_processing_jobs.sql
+!/supabase/migrations/20261113150000_retrieval_efficiency.sql
+!/supabase/migrations/20261116120000_explain_unit_maps.sql
+!/supabase/migrations/20261117120000_explain_preparation.sql
+!/supabase/migrations/20261117130000_fence_explain_checkpoints.sql
+!/supabase/rollbacks/
+/supabase/rollbacks/*
+!/supabase/rollbacks/20261116120000_explain_unit_maps.sql
+!/supabase/rollbacks/20261117130000_fence_explain_checkpoints.sql
+!/supabase/tests/
+/supabase/tests/*
+!/supabase/tests/explain_unit_maps.sql
 
 # Local credentials (keep example templates trackable)
 .env
 .env.*
 !.env.example
+/.socra-p2-gemini.env
+/test-socra.env

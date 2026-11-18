@@ -4,16 +4,76 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from functools import lru_cache
 from math import ceil
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, PositiveInt
 
 from config import DEFAULT_GOOGLE_MODEL, resolve_google_model
 
 logger = logging.getLogger(__name__)
+
+BudgetType = Literal["preparation", "learning"]
+CallPurpose = Literal["plan", "vision", "enrich", "generate", "review", "repair"]
+
+
+class ExplainCallLimit(ValueError):
+    def __init__(self, budget_type: BudgetType):
+        super().__init__(f"The explanation reached its {budget_type} call limit. Ask for a smaller section.")
+
+
+class ReviewConfigurationError(ValueError):
+    pass
+
+
+def review_target(provider, generation_model, generation_budget, configured, *, required=False):
+    if configured is None and not required:
+        return generation_model, generation_budget
+    model = (configured or "").strip()
+    selected_provider = (provider or "google").strip().lower()
+    if (not model or (required and selected_provider != "google")
+            or (selected_provider == "google" and resolve_google_model(model) != model)):
+        raise ReviewConfigurationError("An explicit supported reviewer model is required.")
+    limits = explain_budget(selected_provider, model)
+    if limits is None:
+        raise ReviewConfigurationError("The reviewer model has no verified local quota configuration.")
+    return model, limits
+
+
+@dataclass
+class ExplainCallBudget:
+    """Request-local call ceilings. Reserve at dispatch, including every retry."""
+
+    learning_limit: int
+    preparation_limit: int = 0
+    _calls: Counter[tuple[BudgetType, CallPurpose]] = field(default_factory=Counter, init=False)
+    _retries: Counter[BudgetType] = field(default_factory=Counter, init=False)
+
+    def _used(self, budget_type: BudgetType) -> int:
+        return sum(count for (kind, _), count in self._calls.items() if kind == budget_type)
+
+    def reserve(self, budget_type: BudgetType, purpose: CallPurpose, *, retry: bool = False) -> None:
+        limit = self.learning_limit if budget_type == "learning" else self.preparation_limit
+        if self._used(budget_type) >= limit:
+            raise ExplainCallLimit(budget_type)
+        self._calls[budget_type, purpose] += 1
+        if retry:
+            self._retries[budget_type] += 1
+
+    def summary(self) -> dict:
+        return {
+            kind: {
+                "limit": limit,
+                "used": self._used(kind),
+                "by_purpose": {purpose: count for (bucket, purpose), count in self._calls.items() if bucket == kind},
+                "retries": self._retries[kind],
+            }
+            for kind, limit in (("preparation", self.preparation_limit), ("learning", self.learning_limit))
+        }
 
 
 class ModelLimits(BaseModel):
@@ -61,6 +121,7 @@ class ExplainBudget:
     capacity: int
     max_output_tokens: int
     minute_share: int
+    model_limits: ModelLimits
 
     def prompt_tokens(self, messages, response_schema) -> int:
         payload = json.dumps(
@@ -94,4 +155,4 @@ def explain_budget(provider: str | None, model: str | None) -> ExplainBudget | N
     capacity = min(limits.context_tokens, minute_share)
     # Leave room for input even where the model advertises much more output than the minute quota.
     output = min(limits.max_output_tokens, policy.max_output_tokens, capacity // 3)
-    return ExplainBudget(policy, capacity, output, minute_share)
+    return ExplainBudget(policy, capacity, output, minute_share, limits)

@@ -24,7 +24,8 @@ import { toast } from "sonner"
 import type { Course, Session } from "@/types"
 import type { UIMessage } from "ai"
 import type { LearningMode, PublicCorrection, PublicExercise, PublicSolution } from "@/lib/socra-ws"
-import type { PublicExplanation } from "@/lib/socra-ws"
+import { educationalCitations, isEducationalDocument } from "@/lib/educational-document"
+import type { ExplanationPayload } from "@/lib/socra-ws"
 
 const ChatPanel = lazy(() =>
   import("@/components/chat/ChatPanel").then((m) => ({ default: m.ChatPanel }))
@@ -97,6 +98,7 @@ export default function InquiryPage() {
   const sidebarToggle = useRef<HTMLButtonElement>(null)
   const contextToggle = useRef<HTMLButtonElement>(null)
   const contextClose = useRef<HTMLButtonElement>(null)
+  const focusContextOnOpen = useRef(false)
   const [sourcePage, setSourcePage] = useState<{ id: string; page: number; name: string } | null>(null)
   const [learningMode, setLearningMode] = useState<LearningMode>(() =>
     searchParams.get("mode") === "exercise" ? "exercise" : searchParams.get("mode") === "explain" ? "explain" : "socratic"
@@ -104,7 +106,7 @@ export default function InquiryPage() {
   const [exercise, setExercise] = useState<PublicExercise | null>(null)
   const [correction, setCorrection] = useState<PublicCorrection | null>(null)
   const [solution, setSolution] = useState<PublicSolution | null>(null)
-  const [explanation, setExplanation] = useState<PublicExplanation | null>(null)
+  const [explanation, setExplanation] = useState<ExplanationPayload | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -119,9 +121,32 @@ export default function InquiryPage() {
   useEffect(() => {
     const lg = window.matchMedia("(min-width: 1024px)")
     const xl = window.matchMedia("(min-width: 1280px)")
-    setSidebarOpen(lg.matches)
-    setContextOpen(xl.matches)
+    const resetSidebar = ({ matches }: { matches: boolean }) => {
+      setSidebarOpen(false)
+      if (!matches && document.activeElement?.closest("#inquiry-sidebar")) sidebarToggle.current?.focus()
+    }
+    const syncLayout = ({ matches }: { matches: boolean }) => {
+      const focused = document.activeElement
+      setSidebarOpen(false)
+      setContextOpen(matches)
+      if (focused?.closest("#inquiry-context") && !matches) contextToggle.current?.focus()
+    }
+    syncLayout(xl)
+    lg.addEventListener("change", resetSidebar)
+    xl.addEventListener("change", syncLayout)
+    return () => {
+      lg.removeEventListener("change", resetSidebar)
+      xl.removeEventListener("change", syncLayout)
+    }
   }, [])
+  useEffect(() => {
+    if (!contextOpen || !focusContextOnOpen.current) return
+    const frame = requestAnimationFrame(() => {
+      contextClose.current?.focus({ preventScroll: true })
+      if (document.activeElement === contextClose.current) focusContextOnOpen.current = false
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [contextOpen])
   const [input, setInput] = useState("")
 
   const [keyTerms, setKeyTerms] = useState<string[]>([])
@@ -185,19 +210,22 @@ export default function InquiryPage() {
     })))
   }, [sessionId])
 
-  const handleExplanation = useCallback((value: PublicExplanation) => {
+  const handleExplanation = useCallback((value: ExplanationPayload) => {
     setLearningMode("explain")
     window.localStorage.setItem(storedModeKey(sessionId), "explain")
     setExplanation(value)
     setExercise(null)
     setCorrection(null)
     setSolution(null)
-    setKeyTerms(value.sections?.map((section) => section.heading).filter(Boolean).slice(0, 8) ?? [])
-    setSuggestedReadings(value.citations.map((citation) => ({
+    const citations = isEducationalDocument(value) ? educationalCitations(value) : value.citations
+    const headings = isEducationalDocument(value) ? value.sections.map((section) => section.title)
+      : value.sections?.map((section) => section.heading) ?? []
+    setKeyTerms(headings.filter(Boolean).slice(0, 8))
+    setSuggestedReadings(citations.map((citation) => ({
       documentId: citation.document_id,
       documentName: citation.filename,
       pageNumber: citation.page_number ?? 0,
-      section: citation.excerpt || value.definition,
+      section: citation.excerpt || (isEducationalDocument(value) ? value.title : value.definition),
     })))
   }, [sessionId])
 
@@ -229,7 +257,8 @@ export default function InquiryPage() {
     [activeConfig.apiKey, activeConfig.provider, activeConfig.model]
   )
 
-  const { messages, status, progress, connection, stop, error, sendMessage, submitAttempt, revealSolution, setMessages, regenerate, canRegenerate } = useSocraChat({
+  const { messages, explanationTurns, status, progress, connection, stop, error, sendMessage, runUnitAction,
+    submitAttempt, revealSolution, setMessages, regenerate, canRegenerate } = useSocraChat({
     sessionId,
     courseId,
     recoverInterrupted: !messagesLoading,
@@ -356,7 +385,7 @@ export default function InquiryPage() {
               }
             }
             if (restoredExercise) setExercise(restoredExercise as PublicExercise)
-            if (restoredExplanation) setExplanation(restoredExplanation as PublicExplanation)
+            if (restoredExplanation) setExplanation(restoredExplanation as ExplanationPayload)
             if (restoredCorrection) setCorrection(restoredCorrection as PublicCorrection)
             if (restoredSolution) setSolution(restoredSolution as PublicSolution)
           } else if (!notebookId) {
@@ -493,9 +522,10 @@ export default function InquiryPage() {
     }
   }
 
-  const handleSaveExplanationToLibrary = (value: PublicExplanation, messageId: string) => {
-    const source = value.citations[0]
-    void saveLibraryItem("explanation", value.sections?.[0]?.heading || value.definition.slice(0, 90), { explanation: value, message_id: messageId }, source?.document_id, source?.page_number ?? undefined)
+  const handleSaveExplanationToLibrary = (value: ExplanationPayload, messageId: string) => {
+    const source = (isEducationalDocument(value) ? educationalCitations(value) : value.citations)[0]
+    const title = isEducationalDocument(value) ? value.title : value.sections?.[0]?.heading || value.definition.slice(0, 90)
+    void saveLibraryItem("explanation", title, { message_id: messageId }, source?.document_id, source?.page_number ?? undefined)
   }
 
   const handleSaveExerciseToLibrary = (value: PublicCorrection, answer: PublicSolution) => {
@@ -541,6 +571,7 @@ export default function InquiryPage() {
   }
 
   const closeContext = () => {
+    focusContextOnOpen.current = false
     setContextOpen(false)
     contextToggle.current?.focus()
   }
@@ -554,8 +585,12 @@ export default function InquiryPage() {
 
   return (
     <div className="relative isolate flex h-full min-h-0 overflow-hidden" onKeyDown={(event) => {
-      if (event.key === "Escape") {
-        if (contextOpen) closeContext()
+      if (event.key === "Escape" && event.target instanceof Element) {
+        const plan = event.target.closest<HTMLDetailsElement>("details[data-explanation-plan][open]")
+        if (plan && (!contextOpen || window.matchMedia("(min-width: 1280px)").matches)) {
+          plan.open = false
+          plan.querySelector("summary")?.focus()
+        } else if (contextOpen) closeContext()
         else if (sidebarOpen) closeSidebar()
       }
     }}>
@@ -568,7 +603,13 @@ export default function InquiryPage() {
         aria-expanded={sidebarOpen}
         aria-controls="inquiry-sidebar"
         className="absolute bottom-4 left-4 z-50 lg:hidden h-10 w-10 rounded-full bg-card border border-border/50 shadow-lg"
-        onClick={() => { if (sidebarOpen) closeSidebar(); else setSidebarOpen(true) }}
+        onClick={() => {
+          if (sidebarOpen) closeSidebar()
+          else {
+            setContextOpen(false)
+            setSidebarOpen(true)
+          }
+        }}
       >
         <Menu className="h-4 w-4" />
       </Button>
@@ -577,7 +618,7 @@ export default function InquiryPage() {
       <aside id="inquiry-sidebar" aria-label="Course navigation"
         className={`${
           sidebarOpen ? "visible translate-x-0" : "invisible -translate-x-full lg:visible"
-        } absolute inset-y-0 left-0 z-40 w-64 transition-transform duration-200 lg:relative lg:translate-x-0 shrink-0`}
+        } absolute inset-y-0 left-0 z-40 w-64 bg-background transition-transform duration-200 motion-reduce:transition-none lg:relative lg:translate-x-0 shrink-0`}
       >
         <Sidebar
           courseName={course?.name || "Loading..."}
@@ -600,7 +641,14 @@ export default function InquiryPage() {
       )}
 
       {/* Center Chat Panel */}
-      <section aria-label="Inquiry chat" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <section aria-label="Inquiry chat" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden" onClickCapture={(event) => {
+        if (!(event.target instanceof Element) || window.matchMedia("(min-width: 1280px)").matches) return
+        const plan = event.target.closest("details[data-explanation-plan]:not([open]) > summary")
+        if (plan) {
+          setSidebarOpen(false)
+          setContextOpen(false)
+        }
+      }}>
         {apiKeyIssue && (
           <div role="alert" className="mx-4 mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-foreground sm:mx-6">
             <div className="flex items-start gap-3">
@@ -616,6 +664,8 @@ export default function InquiryPage() {
             language={language}
             onLanguageChange={(value) => void handleLanguageChange(value)}
             messages={messages}
+            explanationTurns={explanationTurns}
+            courseMaterials={courseMaterials}
             input={input}
             status={status}
             progress={progress}
@@ -626,8 +676,9 @@ export default function InquiryPage() {
             onToggleContext={() => {
               if (contextOpen) closeContext()
               else {
+                setSidebarOpen(false)
+                focusContextOnOpen.current = true
                 setContextOpen(true)
-                requestAnimationFrame(() => contextClose.current?.focus())
               }
             }}
             messagesLoading={messagesLoading}
@@ -650,6 +701,7 @@ export default function InquiryPage() {
             onContinueCourse={(from, requestId, label) => {
               sendMessage({ text: label, mode: "explain", continuation: { from, requestId } })
             }}
+            onUnitAction={runUnitAction}
             onSaveExplanationToLibrary={handleSaveExplanationToLibrary}
             explanationOwnerId={user?.id}
             onCaptureResponse={setCapture}
@@ -664,9 +716,14 @@ export default function InquiryPage() {
 
       {/* Right Context Panel */}
       <aside id="inquiry-context" aria-label="Course context" inert={!contextOpen}
+        onTransitionEnd={(event) => {
+          if (event.target !== event.currentTarget || !contextOpen || !focusContextOnOpen.current) return
+          focusContextOnOpen.current = false
+          contextClose.current?.focus({ preventScroll: true })
+        }}
         className={`${
-          contextOpen ? (sourcePage ? "translate-x-0 xl:w-[min(40vw,44rem)] xl:border-l" : "translate-x-0 xl:w-72 xl:border-l") : "translate-x-full xl:translate-x-0 xl:w-0 xl:border-l-0"
-        } absolute inset-y-0 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden border-border/40 transition-[transform,width] duration-200 xl:relative xl:shrink-0`}
+          contextOpen ? (sourcePage ? "translate-x-0 xl:w-[min(40vw,44rem)] xl:border-l" : "translate-x-0 xl:w-72 xl:border-l") : "invisible translate-x-full xl:visible xl:translate-x-0 xl:w-0 xl:border-l-0"
+        } absolute inset-y-0 right-0 z-40 w-72 min-w-0 max-w-full overflow-hidden border-border/40 bg-background transition-[transform,width] duration-200 motion-reduce:transition-none xl:relative xl:shrink-0`}
       >
         <div className={`relative h-full overflow-hidden ${sourcePage ? "w-full" : "w-72"}`}>
           <Button ref={contextClose} size="sm" variant="ghost" onClick={closeContext}

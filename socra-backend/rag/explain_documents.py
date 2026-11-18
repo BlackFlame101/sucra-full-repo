@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from db.supabase_client import get_supabase
+from rag.unit_map import unit_pipeline_enabled
 
 _MAX_CHUNKS = 500
 _MAX_DOCUMENTS = 256
@@ -21,13 +22,18 @@ class DocumentSelection:
     document_ids: tuple[str, ...] = ()
 
 
-async def course_documents(course_id: str, owner_id: str) -> list[dict]:
+async def course_documents(course_id: str, owner_id: str, *, versioned: bool = False) -> list[dict]:
     if not course_id or not owner_id:
         raise ValueError("An authenticated course is required to select an Explain document.")
 
     def read():
+        fields = "id,filename,page_count,index_chunk_count,content_hash,index_config,courses!inner(user_id)"
+        if unit_pipeline_enabled() or versioned:
+            fields += ",index_generation,index_stage"
+        if versioned:
+            fields += ",course_id,storage_path,file_size"
         response = (get_supabase().table("documents")
-                    .select("id,filename,page_count,index_chunk_count,content_hash,index_config,courses!inner(user_id)", count="exact")
+                    .select(fields, count="exact")
                     .eq("course_id", course_id).eq("courses.user_id", owner_id)
                     .eq("index_status", "ready").order("id").limit(_MAX_DOCUMENTS).execute())
         if response.count != len(response.data or []):
@@ -99,10 +105,11 @@ def select_document(documents: list[dict], topic: str, chunks: list[dict], expli
     raise ValueError("Which PDF should Explain use? Name a file in this course or ask to compare the documents.")
 
 
-def complete_index(chunks: list[dict], document: dict, expected_count: int | None = None) -> bool:
+def complete_index(chunks: list[dict], document: dict, expected_count: int | None = None, *,
+                   paged: bool = False) -> bool:
     count = expected_count if expected_count is not None else document.get("index_chunk_count")
     pages = document.get("page_count")
-    if type(count) is not int or not 1 <= count <= _MAX_CHUNKS or len(chunks) != count:
+    if type(count) is not int or count < 1 or (not paged and count > _MAX_CHUNKS) or len(chunks) != count:
         return False
     if type(pages) is not int or not 1 <= pages <= count:
         return False
@@ -115,12 +122,18 @@ def complete_index(chunks: list[dict], document: dict, expected_count: int | Non
 
 async def document_inventory_chunks(
     course_id: str, owner_id: str, document: dict, retrieved: list[dict],
+    *, versioned: bool = False,
 ) -> tuple[list[dict], str]:
     """Verify a full index snapshot or return only the already retrieved excerpts."""
     if not course_id or not owner_id:
         raise ValueError("An authenticated course is required to read Explain source material.")
     document_id = str(document["id"])
     selected = [chunk for chunk in retrieved if str(chunk.get("document_id")) == document_id]
+    if (unit_pipeline_enabled() or versioned) and "index_generation" in document:
+        if document.get("index_stage") is not None:
+            return selected, "retrieved_only"
+        rows = await asyncio.to_thread(_read_paged_index, course_id, owner_id, document)
+        return (rows, "full_document") if rows is not None else (selected, "retrieved_only")
     if complete_index(selected, document):
         return selected, "full_document"
     if (document.get("index_chunk_count") or 0) > _MAX_CHUNKS:
@@ -147,3 +160,42 @@ async def document_inventory_chunks(
         ], "full_document"
 
     return await asyncio.to_thread(read)
+
+
+def _read_paged_index(course_id: str, owner_id: str, document: dict) -> list[dict] | None:
+    expected = document.get("index_chunk_count")
+    if expected is not None and (type(expected) is not int or expected < 1):
+        return None
+    client = get_supabase()
+    rows = []
+    cursor = -1
+    while expected is None or len(rows) < expected:
+        query = (client.table("embeddings")
+                 .select("id,document_id,content,page_number,chunk_index,documents!inner(courses!inner(user_id))",
+                         count="exact" if cursor == -1 else None)
+                 .eq("document_id", str(document["id"])).eq("documents.course_id", course_id)
+                 .eq("documents.courses.user_id", owner_id).eq("documents.index_status", "ready")
+                 .is_("documents.index_stage", "null"))
+        for field in ("content_hash", "index_config", "index_chunk_count", "page_count", "index_generation"):
+            version = document.get(field)
+            query = query.is_("documents." + field, "null") if version is None else query.eq("documents." + field, version)
+        batch = query.order("chunk_index").order("id").limit(_MAX_CHUNKS)
+        if cursor >= 0:
+            batch = batch.gt("chunk_index", cursor)
+        response = batch.execute()
+        if cursor == -1:
+            if expected is not None and response.count != expected:
+                return None
+            expected = response.count
+            if type(expected) is not int or expected < 1:
+                return None
+        batch_rows = response.data or []
+        if not batch_rows or any(row.get("chunk_index") != len(rows) + offset
+                                 for offset, row in enumerate(batch_rows)):
+            return None
+        rows.extend(batch_rows)
+        cursor = rows[-1]["chunk_index"]
+    if not complete_index(rows, document, expected, paged=True):
+        return None
+    return [{key: value for key, value in row.items() if key != "documents"}
+            | {"filename": document.get("filename"), "similarity": 0.0} for row in rows]

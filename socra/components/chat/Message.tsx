@@ -17,8 +17,8 @@ function getTextContent(message: UIMessage): string {
 }
 
 export function Message({ message, isStreaming }: MessageProps) {
-  const metadata = message.metadata as { explanation?: unknown; explanationPreview?: boolean; partial?: boolean } | undefined
-  if (message.role === "assistant" && metadata?.explanation) return null
+  const metadata = message.metadata as { explanation?: unknown; explanationPreview?: boolean; partial?: boolean; explanationStream?: unknown } | undefined
+  if (message.role === "assistant" && (metadata?.explanation || metadata?.explanationStream)) return null
   const text = getTextContent(message)
   if (!text) return null
 

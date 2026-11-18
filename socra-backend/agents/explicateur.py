@@ -9,7 +9,7 @@ import re
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from email.utils import parsedate_to_datetime
 from math import isfinite
 from random import uniform
@@ -22,11 +22,26 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.metrics import structured_failure
 from agents.explanation_preview import explanation_preview
-from agents.explain_budget import ExplainBudget, explain_budget
+from agents.explain_budget import CallPurpose, ExplainBudget, ExplainCallBudget, ExplainCallLimit, explain_budget, review_target
 from agents.explain_coverage import evaluate_coverage, missing_requirements, relevant_requirements, requirement_label
 from agents.explain_tasks import ExplainTask, classify_explain_task, explain_flag, is_brief_request, task_prompt, task_repair
 from agents.explain_intent import adaptive_prompt, classify_intent
-from agents.explain_course import assess_part, part_progress, plan_course
+from agents.explain_course import assess_part, part_progress, plan_course, reconcile_saved_units, resume_unit_part, unit_excerpts
+from agents.explain_verifier import structure_findings
+from db.unit_maps import load_or_queue_unit_map, load_prepared_evidence, queue_unit_evidence
+from db.explain_progress import CheckpointRejected
+from agents.explain_planner import build_learning_plan, has_explicit_scope, learning_progress
+from agents.explain_tagged_output import generation_format
+from agents.explain_unit_generation import (
+    BATCH_SCHEMA, PROVIDER_TEXT_CORRUPTION, SCHEMA as UNIT_DRAFT_SCHEMA, _source_material, generate_unit,
+    generation_packet, legacy_projection, linked_evidence, plan_generation_batch, related_unit_ids,
+    systemic_generation_failure, unpack_generation_batch,
+)
+from agents.explain_lab_verification import deterministic_passed, lab_approval_passed, requires_lab_check
+from agents.explain_unit_review import LAB_REVIEW_SCHEMA, lab_provider_response, review_output_allowance, review_units
+from agents.explain_lifecycle import (PROMPT_VERSION, attach_contract, correction_event, latest_outputs,
+                                     next_unit, rebind_version, review_safe_output, same_source, saved_versions, version_for)
+from rag.unit_map import unit_pipeline_enabled
 from agents.llm import get_chat_llm, is_transient_provider_error, provider_error_code, visible_text
 from agents.structured_output import parse_json_object, recover_json_prefix
 from graph.state import SocraState
@@ -69,6 +84,9 @@ class _ExplainMetrics:
     model_attempts: int = 0
     preview_parses: int = 0
     truncated: bool = False
+    call_budget: ExplainCallBudget | None = None
+    evidence_candidates: int = 0
+    generation_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     @contextmanager
     def time(self, stage: str) -> Iterator[None]:
@@ -84,6 +102,9 @@ class _ExplainMetrics:
             "outcome": outcome,
             **self.retrieval,
             "model_attempts": self.model_attempts,
+            **({"call_budget": self.call_budget.summary(), "generation_attempts": self.generation_attempts,
+                "generation_evidence_candidates": self.evidence_candidates}
+               if self.call_budget is not None else {}),
             "preview_parses": self.preview_parses,
             "preview_parse_ms": round(self.timings.get("preview_parsing", 0), 2),
             "truncated": self.truncated,
@@ -93,6 +114,42 @@ class _ExplainMetrics:
             "elapsed_ms": {stage: round(self.timings.get(stage, 0), 2) for stage in
                            ("retrieval", "generation", "parsing", "citation_binding")},
         }))
+
+    @contextmanager
+    def model_attempt(self, purpose: CallPurpose, *, retry: bool, sent: int, candidates: int):
+        if self.call_budget is None:
+            self.model_attempts += 1
+            yield None
+            return
+
+        self.call_budget.reserve("learning", purpose, retry=retry)
+        self.model_attempts += 1
+        usage: Counter[str] = Counter()
+        status = "ok"
+        try:
+            yield usage
+        except BaseException as exc:
+            status = type(exc).__name__
+            raise
+        finally:
+            self.generation_attempts.append({
+                "purpose": purpose,
+                "budget_type": "learning",
+                "retry": retry,
+                "status": status,
+                "chunks_sent": sent,
+                "chunks_dropped": max(0, candidates - sent),
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+            })
+
+
+def _record_usage(total: Counter[str] | None, message: Any) -> None:
+    # LangChain normalizes streamed usage into per-chunk deltas.
+    if total is not None and (usage := getattr(message, "usage_metadata", None)):
+        for key in ("input_tokens", "output_tokens"):
+            if type(value := usage.get(key)) is int and value >= 0:
+                total[key] += value
 
 _EXPLANATION_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -797,12 +854,18 @@ def _transient_retry(exc: Exception) -> tuple[str, float] | None:
 async def _draft_explanation(
     model: Any, prompt: list[Any], preview: Callable[[str | None], Awaitable[None]] | None,
     draft_shown: bool, budget: _GenerationBudget, metrics: _ExplainMetrics,
+    *, purpose: CallPurpose, retry: bool, sent: int, candidates: int, allowance: int,
 ) -> tuple[Any, str]:
     async with budget.within_deadline():
-        metrics.model_attempts += 1
-        with metrics.time("generation"):
+        with (
+            metrics.model_attempt(purpose, retry=retry, sent=sent, candidates=candidates) as usage,
+            metrics.time("generation"),
+        ):
+            if metrics.call_budget is not None:
+                budget.reserved_tokens += allowance
             if preview is None:
                 response = await model.ainvoke(prompt)
+                _record_usage(usage, response)
                 return response.content, str(response.response_metadata.get("finish_reason", ""))
 
             raw = displayed = finish_reason = ""
@@ -826,6 +889,7 @@ async def _draft_explanation(
                     draft_shown = True
 
             async for chunk in model.astream(prompt):
+                _record_usage(usage, chunk)
                 finish_reason = str(chunk.response_metadata.get("finish_reason") or finish_reason)
                 raw += visible_text(chunk.content)
                 if not parsed_length or len(raw) - parsed_length >= 2048 or monotonic() - last_parse >= 0.2:
@@ -885,9 +949,10 @@ async def _generate_valid_explanation(
     state: SocraState, metrics: _ExplainMetrics, budget: _GenerationBudget,
     task: ExplainTask | None = None,
     token_budget: ExplainBudget | None = None,
-    *, allow_retry: bool = True,
+    *, allow_retry: bool = True, purpose: CallPurpose = "generate",
 ) -> GeneratedExplanation:
     draft_shown = False
+    is_retry = False
     repair = HumanMessage(content=(
         "The previous response did not match the required format. Return exactly one valid JSON object. "
         + ("Use only citations and sections. Put citation indexes before sections. "
@@ -905,23 +970,30 @@ async def _generate_valid_explanation(
         draft_shown = text is not None
 
     while True:
+        allowance = 0
         if token_budget:
             allowance = token_budget.prompt_tokens(prompt, _response_schema(task)) + token_budget.max_output_tokens
             if (not token_budget.fits(prompt, _response_schema(task), reserve_retry=False)
                     or budget.reserved_tokens + allowance > token_budget.minute_share):
                 raise _ExplainTokenBudgetError
-            budget.reserved_tokens += allowance
+            if metrics.call_budget is None:
+                budget.reserved_tokens += allowance
         if progress:
             await progress("Drafting the explanation.")
         try:
             response_content, finish_reason = await _draft_explanation(
                 model, prompt, track_preview if preview else None, draft_shown, budget, metrics,
+                purpose=purpose, retry=is_retry, sent=len(chunks), allowance=allowance,
+                candidates=metrics.evidence_candidates if purpose == "generate" else len(chunks),
             )
+        except ExplainCallLimit:
+            raise
         except Exception as exc:
             if provider_error_code(exc) == "GROQ_STRUCTURED_OUTPUT_FAILED":
                 if not allow_retry or not budget.take_retry():
                     raise
                 metrics.retries["provider_invalid_json"] += 1
+                is_retry = True
                 prompt = [*prompt, repair]
                 continue
             retry = _transient_retry(exc)
@@ -929,6 +1001,7 @@ async def _generate_valid_explanation(
                 raise
             reason, delay = retry
             metrics.retries[reason] += 1
+            is_retry = True
             if progress:
                 await progress("The AI provider interrupted or delayed the explanation. Retrying.")
             await asyncio.sleep(delay)
@@ -971,6 +1044,7 @@ async def _generate_valid_explanation(
                     "Could not prepare a valid course-grounded explanation within the retry budget. "
                     "Try a narrower request."
                 ) from exc
+            is_retry = True
             metrics.retries[failure_reason] += 1
             prompt = [*prompt, repair]
 
@@ -1091,7 +1165,7 @@ async def _check_and_repair(
                     # deadline and token ledger. No transport or format retries on this call.
                     part = await _generate_valid_explanation(
                         model, prompt, excerpts, None, progress, state, metrics, budget, task,
-                        token_budget, allow_retry=False,
+                        token_budget, allow_retry=False, purpose="repair",
                     )
                     cited = {(str(cite.document_id), cite.page_number) for cite in part.citations}
                     sent = {str(chunk["id"]) for chunk in excerpts
@@ -1108,6 +1182,8 @@ async def _check_and_repair(
                         # Repair is verified against its own evidence before updating the request ledger.
                         evidence_ids.update(sent)
                         repair_evidence = sent
+                except ExplainCallLimit:
+                    skip_reason = "call_budget"
                 except Exception as exc:
                     logger.info("explain_coverage_repair_unavailable error_type=%s", type(exc).__name__)
                 finally:
@@ -1131,7 +1207,16 @@ async def _check_and_repair(
 
 
 async def run_explicateur(state: SocraState) -> SocraState:
+    from agents.explain_document import educational_documents_enabled, run_educational_document
+
+    if educational_documents_enabled() and not state.get("explain_unit_action") and not state.get("explain_course_prior"):
+        return await run_educational_document(state)
     metrics = _ExplainMetrics(state.get("request_id"))
+    if unit_pipeline_enabled():
+        metrics.call_budget = ExplainCallBudget(
+            learning_limit=min(3 if state.get("explain_unit_action") == "deepen_unit" else 12,
+                               _batch_setting("SOCRA_EXPLAIN_UNIT_MAX_LEARNING_CALLS", 12, maximum=12)),
+        )
     outcome = "failed"
     try:
         result = await _run_explicateur(state, metrics)
@@ -1147,6 +1232,331 @@ async def run_explicateur(state: SocraState) -> SocraState:
         metrics.log(outcome)
 
 
+async def _generate_course_units(state, metrics, token_budget, units, records, excerpts, plan, unit_map, language,
+                                 *, overview, continuity, prior_facts, versions=(), deepen=None):
+    """Dispatch complete units under the existing request time, call and token limits."""
+    timer = _GenerationBudget()
+    tagged = generation_format() == "tagged"
+    preview = state.get("preview")
+    drafts = []
+    halted = None
+    generation_models = {}
+    output_scale = 1.0
+    checkpoint = state.get("explain_checkpoint")
+    event = state.get("explain_unit_event")
+    request_id = state.get("request_id")
+    cache_key = [PROMPT_VERSION, plan["level"], plan["depth"], language]
+    if tagged:
+        cache_key.append("tagged-groups")
+    same_turn = {row["output"]["logical_id"]: row for row in versions if row["request_id"] == request_id}
+    cached = {row["output"]["logical_id"]: row for row in versions
+              if row["stage"] == "ready" and row["output"]["blocks"] and row.get("cache_key") == cache_key
+              and row["output"]["verification"] == "reviewed" and not row["output"].get("interruptions")}
+    old = latest_outputs(versions)
+    prior_review_dispatch = bool(checkpoint and any(call["purpose"] == "review" for call in checkpoint.data["calls"]))
+    if checkpoint:
+        for call in checkpoint.data["calls"]:
+            try:
+                metrics.call_budget.reserve("learning", call["purpose"])
+            except ExplainCallLimit:
+                break
+            timer.reserved_tokens += call["tokens"]
+
+    async def publish(unit, stage, draft):
+        identity = {"id": unit["logical_id"], "content_version": unit["content_version"],
+                    "label": unit["label"], "kind": unit["kind"], "title": unit["title"],
+                    "start": unit["start"][0], "end": unit["end"][0], "status": draft["coverage"]}
+        row = version_for(request_id, stage, draft) | {
+            "cache_key": cache_key, "required_item_ids": sorted(plan["required_items"].get(draft["logical_id"], ())),
+            "document_id": checkpoint.data["document_id"], "generation": checkpoint.data["generation"],
+            "source_hash": checkpoint.data["source_hash"],
+            "identity": identity,
+        }
+        if row["stage"] != "ready":
+            row["deterministic_facts"] = draft["verified_facts"]
+        await checkpoint.save(version=row)
+        if event:
+            await event("unit_ready" if row["stage"] == "ready" else "unit_draft",
+                        {key: value for key, value in row.items() if key != "deterministic_facts"})
+            if row["stage"] == "ready":
+                for change in row["change_log"]:
+                    await event("unit_correction", correction_event(row, change))
+
+    def fits(messages):
+        schema = None if tagged else UNIT_DRAFT_SCHEMA
+        return token_budget is not None and token_budget.fits(messages, schema, reserve_retry=False)
+
+    async def dispatch(messages, source_count, *, schema=UNIT_DRAFT_SCHEMA, output=None):
+        nonlocal output_scale
+        raw, reason = "", ""
+        if metrics.call_budget and any(draft["blocks"] for draft in drafts):
+            calls = metrics.call_budget.summary()["learning"]
+            if calls["limit"] > 1 and calls["used"] >= calls["limit"] - 1:
+                raise ExplainCallLimit("learning")
+        output = output or token_budget.max_output_tokens
+        wire_schema = None if tagged else schema
+        allowance = token_budget.prompt_tokens(messages, wire_schema) + output
+        if timer.reserved_tokens + allowance > token_budget.minute_share:
+            return raw, "token_budget"
+        try:
+            async with timer.within_deadline():
+                with metrics.model_attempt("generate", retry=False, sent=source_count, candidates=source_count) as usage:
+                    timer.reserved_tokens += allowance
+                    if checkpoint:
+                        await checkpoint.save(purpose="generate", tokens=allowance)
+                    key = (schema is BATCH_SCHEMA, output)
+                    if key not in generation_models:
+                        generation_models[key] = get_chat_llm(
+                            temperature=.25, streaming=bool(preview), api_key=state.get("api_key"),
+                            model=state.get("model"), provider=state.get("provider"),
+                            max_completion_tokens=output, response_schema=wire_schema,
+                            single_attempt=True, agent="explain_unit_generation", request_id=state.get("request_id"),
+                        )
+                    model = generation_models[key]
+                    if preview:
+                        async for message in model.astream(messages):
+                            _record_usage(usage, message)
+                            raw += visible_text(message.content)
+                            reason = str(message.response_metadata.get("finish_reason") or reason)
+                    else:
+                        message = await model.ainvoke(messages)
+                        _record_usage(usage, message)
+                        raw = visible_text(message.content)
+                        reason = str(message.response_metadata.get("finish_reason") or "")
+                    if schema is BATCH_SCHEMA and usage and usage.get("output_tokens"):
+                        output_scale = max(output_scale, min(2.0, usage["output_tokens"] * 1.15 / output))
+        except (ExplainCallLimit, CheckpointRejected):
+            raise
+        except _GenerationDeadline:
+            return raw, "deadline"
+        except Exception as exc:
+            logger.warning("explain_unit_stream_interrupted type=%s", type(exc).__name__)
+            return raw, "provider_failure"
+        truncated = reason.casefold() in {"length", "max_tokens", "max output tokens"}
+        if truncated and schema is BATCH_SCHEMA:
+            output_scale = max(output_scale, 1.25)
+        return raw, "truncated" if truncated else ""
+
+    stage_models = {}
+
+    def fits_review(messages, schema, count):
+        _, limits = review_target(state.get("provider"), state.get("model"), token_budget,
+                                  os.getenv("SOCRA_EXPLAIN_REVIEW_MODEL"), required=schema is LAB_REVIEW_SCHEMA)
+        if limits is None or token_budget is None:
+            return False
+        output = review_output_allowance(limits, schema, count)
+        allowance = limits.prompt_tokens(messages, schema) + output
+        return (output <= limits.max_output_tokens and allowance <= limits.capacity
+                and timer.reserved_tokens + allowance <= min(limits.minute_share, token_budget.minute_share))
+
+    async def review_dispatch(purpose, messages, schema, *, retry=False):
+        reviewer = os.getenv("SOCRA_EXPLAIN_REVIEW_MODEL") if purpose == "review" else None
+        model_name, limits = review_target(state.get("provider"), state.get("model"), token_budget, reviewer,
+                                           required=schema is LAB_REVIEW_SCHEMA)
+        if halted in {"provider_failure", "deadline", "systemic_generation_failure"} or limits is None or token_budget is None:
+            raise ValueError("Review or repair could not fit the remaining request budget")
+        output = (review_output_allowance(limits, schema, len(json.loads(messages[-1].content)))
+                  if purpose == "review" else limits.max_output_tokens)
+        allowance = limits.prompt_tokens(messages, schema) + output
+        if (output > limits.max_output_tokens or allowance > limits.capacity
+                or timer.reserved_tokens + allowance > min(limits.minute_share, token_budget.minute_share)):
+            raise ValueError("Review or repair token allowance exhausted")
+        try:
+            async with timer.within_deadline():
+                with metrics.model_attempt(purpose, retry=retry, sent=0, candidates=0) as usage:
+                    timer.reserved_tokens += allowance
+                    if checkpoint:
+                        await checkpoint.save(purpose=purpose, tokens=allowance)
+                    key = (purpose, output, id(schema))
+                    if key not in stage_models:
+                        stage_models[key] = get_chat_llm(
+                            temperature=0, api_key=state.get("api_key"), model=model_name,
+                            provider=state.get("provider"), max_completion_tokens=output,
+                            response_schema=schema, bind_response_schema=purpose == "review", single_attempt=True,
+                            agent=f"explain_unit_{purpose}", request_id=state.get("request_id"),
+                        )
+                    result = await stage_models[key].ainvoke(messages)
+                    _record_usage(usage, result)
+                    raw = visible_text(result.content)
+                    return lab_provider_response(raw, model_name, result.response_metadata) if schema is LAB_REVIEW_SCHEMA else raw
+        except (ExplainCallLimit, CheckpointRejected):
+            raise
+        except Exception as exc:
+            logger.warning("explain_unit_review_dispatch_failed purpose=%s type=%s", purpose, type(exc).__name__)
+            if isinstance(exc, (TimeoutError, ConnectionError)) or is_transient_provider_error(exc):
+                raise ConnectionError("Review provider temporarily unavailable") from exc
+            raise ValueError("Review or repair provider was unavailable") from exc
+
+    recent = list(continuity)
+    facts = list(prior_facts)
+
+    def saved_version(uid):
+        saved = same_turn.get(uid)
+        if not saved and state.get("explain_unit_action") == "continue_learning" and uid in old:
+            saved = next(row for row in reversed(versions) if row["stage"] == "ready" and row["output"] == old[uid])
+        if not saved and uid != deepen:
+            candidate = cached.get(uid, {})
+            if (candidate.get("required_item_ids") == sorted(plan["required_items"].get(uid, ()))
+                    and candidate["output"]["unverifiable_source"] == plan["unverifiable_source"].get(uid, [])):
+                saved = candidate
+        if not saved and uid == deepen and uid in old:
+            previous = old[uid]
+            previous_row = next((row for row in reversed(versions)
+                                 if row["stage"] == "ready" and row["output"] == previous), None)
+            if (previous_row and previous["blocks"] and not previous.get("interruptions")
+                    and previous.get("review_state") == "unreviewed"
+                    and previous.get("review_reason") in {"review_token_budget", "review_call_budget"}
+                    and metrics.call_budget and metrics.call_budget.learning_limit > 1
+                    and previous_row.get("cache_key") == cache_key
+                    and previous_row.get("required_item_ids") == sorted(plan["required_items"].get(uid, ()))
+                    and previous["unverifiable_source"] == plan["unverifiable_source"].get(uid, [])):
+                saved = previous_row | {"stage": "draft"}
+        return saved
+
+    excerpts_by_unit = {}
+    for row in excerpts:
+        excerpts_by_unit.setdefault(row["unit_id"], []).append(row)
+    linked = {unit["logical_id"]: linked_evidence(unit, unit_map, records, excerpts_by_unit) for unit in units}
+
+    def current_record(unit):
+        record = records.get(unit["logical_id"], {})
+        return record if record.get("content_version") == unit["content_version"] else {}
+
+    def teaching_context(record):
+        return {"recent_units": recent[-4:], "overview_already_shown": not overview or bool(drafts),
+                "prereqs_assumed": plan["prereqs_assumed"][:8],
+                "prerequisite_facts": [
+                    {key: fact[key] for key in ("label_path", "value") if key in fact}
+                    for fact in facts if fact.get("unit_id") in record.get("depends_on", ())
+                ][-8:]}
+
+    def consecutive_packets(position):
+        first = units[position]
+        first_path = first.get("heading_path") or ()
+        for candidate in units[position:]:
+            uid = candidate["logical_id"]
+            record = current_record(candidate)
+            path = candidate.get("heading_path") or ()
+            shared_parent = bool(first_path and path and first_path[0] == path[0])
+            adjacent_steps = first["kind"] == candidate["kind"] == "lab_step"
+            if (requires_lab_check(candidate) or not record or saved_version(uid) or uid == deepen
+                    or candidate.get("document_id") != first.get("document_id")
+                    or (candidate is not first and not (shared_parent or adjacent_steps))):
+                break
+            yield generation_packet(candidate, record, excerpts_by_unit.get(uid, []), plan,
+                                    teaching_context(record), language, linked[uid])
+
+    batch_responses = {}
+    batch_start = None
+    pending = {}
+    for position, unit in enumerate(units):
+        uid = unit["logical_id"]
+        saved = saved_version(uid)
+        if saved and requires_lab_check(unit) and (
+                not deterministic_passed(saved["output"])
+                or (saved["stage"] == "ready" and not lab_approval_passed(saved["output"]))):
+            saved = None
+        if saved and saved["stage"] == "ready":
+            output = review_safe_output(saved["output"])
+            drafts.append(output)
+            facts.extend(output["verified_facts"])
+            if event:
+                await event("unit_ready", saved | {"output": output, "replayed": True})
+                for change in saved["change_log"]:
+                    await event("unit_correction", correction_event(saved, change))
+            continue
+        record = current_record(unit)
+        if (halted and uid not in batch_responses) or not record:
+            gap = {"page": unit["start"][0], "reason": halted or "preparation_pending",
+                   "status": "unverifiable_source"}
+            draft = {"logical_id": uid, "title": unit["title"], "content_version": unit["content_version"],
+                           "blocks": [], "sources": [], "missing_item_ids": plan["required_items"].get(uid, []),
+                           "unverifiable_source": plan["unverifiable_source"].get(uid, []),
+                           "interruptions": [gap["reason"]], "coverage": "not_generated",
+                           "verification": "unreviewed", "verified_facts": [], "findings": []}
+            if checkpoint and not halted:
+                await publish(unit, "ready", draft)
+            drafts.append(draft)
+            continue
+        if saved:
+            draft = saved["output"] | {"verified_facts": saved.get("deterministic_facts", [])}
+        else:
+            if uid not in batch_responses and token_budget is not None:
+                batch = plan_generation_batch(consecutive_packets(position), token_budget, output_scale=output_scale)
+                if batch:
+                    size, messages, output, source_count = batch
+                    batch_start = len(drafts)
+                    identifiers = [u["logical_id"] for u in units[position:position + size]]
+                    try:
+                        raw, reason = await dispatch(messages, source_count, schema=BATCH_SCHEMA, output=output)
+                    except ExplainCallLimit:
+                        raw, reason = "", "call_budget"
+                    packets = json.loads(messages[-1].content)["units"] if tagged else None
+                    batch_responses.update(unpack_generation_batch(raw, identifiers, reason, packets=packets))
+                    if reason in {"call_budget", "token_budget", "deadline", "provider_failure"}:
+                        halted = reason
+            draft = await generate_unit(unit, record, excerpts_by_unit.get(uid, []), plan, dispatch,
+                                        fits=fits, continuity=teaching_context(record), language=language,
+                                        unit_map=unit_map, prior=old.get(uid) if uid == deepen else None,
+                                        batch_response=batch_responses.pop(uid, None),
+                                        max_output=int(token_budget.max_output_tokens / output_scale) if token_budget else None,
+                                        stop_on_invalid_packet=True, related=linked[uid])
+        if draft["blocks"]:
+            recent.append({"title": unit["title"], "status": draft["coverage"]})
+            if checkpoint and not saved:
+                await publish(unit, "draft", draft)
+            if preview:
+                provisional = "Provisoire" if language == "French" else "Provisional"
+                texts = [block["text"] for block in draft["blocks"] if block["provenance"] in {"course", "derived"}]
+                if texts:
+                    await preview(f"\n\n### {unit['title']} · {provisional}\n\n" + "\n\n".join(texts))
+        if any(reason in draft["interruptions"] for reason in ("call_budget", "token_budget", "deadline", "provider_failure")):
+            halted = next(reason for reason in draft["interruptions"]
+                          if reason in {"call_budget", "token_budget", "deadline", "provider_failure"})
+        pending[uid] = (unit, not (saved and saved["stage"] == "repaired"))
+        drafts.append(draft)
+        if not saved and not batch_responses:
+            completed = drafts[batch_start:] if batch_start is not None else [draft]
+            batch_start = None
+            failed_packet = any("zero_retained_blocks" in member["interruptions"] for member in completed)
+            failure = systemic_generation_failure(completed, plan["required_items"])
+            if failed_packet and failure != PROVIDER_TEXT_CORRUPTION:
+                failure = "zero_retained_blocks"
+            if not halted and failure:
+                halted = "systemic_generation_failure"
+                metrics.retrieval[halted] = failure
+                for member in completed:
+                    member["interruptions"].append(halted)
+                    if failure == PROVIDER_TEXT_CORRUPTION and failure not in member["interruptions"]:
+                        member["interruptions"].append(failure)
+    if checkpoint and event:
+        for draft in drafts:
+            if draft["logical_id"] in pending and draft["blocks"]:
+                await event("unit_checking", {"logical_id": draft["logical_id"], "content_version": draft["content_version"]})
+
+    async def publish_revision(revised):
+        await publish(pending[revised["logical_id"]][0], "repaired", revised)
+
+    async def retry_review(purpose, messages, schema):
+        return await review_dispatch(purpose, messages, schema, retry=True)
+
+    reviewed = await review_units(
+        [draft for draft in drafts if draft["logical_id"] in pending], unit_map, records, excerpts, plan,
+        prior_facts, review_dispatch, on_revision=publish_revision if checkpoint else None,
+        allow_repair={uid for uid, (_, repair) in pending.items() if repair}, fits=fits_review,
+        retry_dispatch=None if prior_review_dispatch else retry_review,
+        related=linked,
+    )
+    by_id = {draft["logical_id"]: draft for draft in reviewed}
+    if checkpoint:
+        for draft in reviewed:
+            await publish(pending[draft["logical_id"]][0], "ready", draft)
+    drafts = [by_id.get(draft["logical_id"], draft) for draft in drafts]
+    metrics.retrieval["reserved_request_tokens"] = timer.reserved_tokens
+    metrics.truncated |= any("truncated" in draft["interruptions"] for draft in drafts)
+    return drafts
+
+
 async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> SocraState:
     topic = (state.get("student_message") or "").strip()
     course_id = state.get("course_id", "")
@@ -1156,6 +1566,12 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
     brief = style == "short summary"
     intent_enabled = explain_flag("EXPLAIN_INTENT_PLANS")
     prior_part = state.get("explain_course_prior") if intent_enabled else None
+    operation = state.get("explain_unit_action")
+    target_unit = state.get("explain_target_unit")
+    checkpoint = state.get("explain_checkpoint")
+    unit_event = state.get("explain_unit_event")
+    versions = []
+    reconciliation = []
     intent = classify_intent(topic, state.get("language"), state.get("explain_language_explicit", False)) if intent_enabled else None
     if intent and intent.intent not in {"exercise_help", "lab_walkthrough"}:
         brief = intent.intent == "summary"
@@ -1181,7 +1597,10 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         if task.intent == "short_summary" and (intent is None or brief):
             style = "short summary"
         metrics.retrieval.update(intent=task.intent, detail_level=task.detail_level, language=task.language)
-    full_course = bool(intent and intent.intent == "full_course")
+    scoped_unit_request = bool(unit_pipeline_enabled() and intent and (
+        has_explicit_scope(topic) or (state.get("explain_document_id") and intent.intent in {"exercise_help", "lab_walkthrough"})
+    ))
+    full_course = bool(intent and (intent.intent == "full_course" or scoped_unit_request or operation))
     explicit_document = prior_part["document_id"] if prior_part else state.get("explain_document_id")
     if explicit_document and not (inventory_enabled or full_course):
         raise ValueError("Explicit PDF selection is currently disabled for Explain.")
@@ -1253,9 +1672,13 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         )),
     )
     document_inventory = None
+    retrieved_chunks = chunks
     indexed_chunks = chunks
     token_budget = None
     course_part = None
+    current_unit_map = None
+    learning_plan = None
+    prepared = {}
     if use_inventory:
         scope = "retrieved_only"
         reason = "catalog_unavailable"
@@ -1296,20 +1719,138 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
                 raise ValueError("Choose one PDF to study the course in order.")
             document = selection.document
             document_id = str(document["id"])
-            maps = await get_current_course_sections(course_id)
+            if operation and (prior_part.get("source_hash") != document.get("content_hash")
+                              or prior_part.get("index_generation") != document.get("index_generation")):
+                raise ValueError("This continuation refers to an older PDF index. Open a current explanation.")
+            prior_unit_map = bool(prior_part and prior_part.get("unit_map_version"))
+            if unit_pipeline_enabled() and (not prior_part or prior_unit_map):
+                try:
+                    current_unit_map = await load_or_queue_unit_map(course_id, owner_id, document)
+                except Exception as exc:
+                    logger.warning("explain_unit_map_unavailable error_type=%s", type(exc).__name__)
+                if prior_unit_map and not current_unit_map:
+                    raise ValueError("The Unit Map for this document is being rebuilt. Try Continue again after indexing.")
+                if not current_unit_map and has_explicit_scope(topic):
+                    raise ValueError("The Unit Map is being prepared. Try again once the requested sections can be located.")
+            maps = [] if current_unit_map else await get_current_course_sections(course_id)
+            planned_units = current_unit_map["units"] if current_unit_map else None
+            if current_unit_map:
+                if checkpoint:
+                    if unit_event:
+                        await unit_event("prep_status", {"document_id": document_id, "status": "loading"})
+                    checkpoints = await checkpoint.open(document)
+                try:
+                    prepared = await load_prepared_evidence(course_id, owner_id, document)
+                except Exception as exc:
+                    logger.warning("explain_prepared_evidence_unavailable type=%s", type(exc).__name__)
+                level = intent.level
+                profile_level = (state.get("profile") or {}).get("level")
+                if level == "unspecified" and profile_level in ("beginner", "intermediate", "advanced"):
+                    level = profile_level
+                learning_plan = build_learning_plan(planned_units, current_unit_map["text_hash"], topic, prepared,
+                                                    level=level, summary=intent.intent == "summary",
+                                                    requested_exercises=exercise_numbers if intent.intent == "exercise_help" else ())
+                if not learning_plan["order"] and has_explicit_scope(topic):
+                    raise ValueError("No teaching unit matched the requested scope in this PDF.")
+                by_id = {unit["logical_id"]: unit for unit in planned_units}
+                if checkpoint:
+                    prior_ids = {row["output"]["logical_id"] for entry in checkpoints
+                                 for row in entry["versions"] if row["stage"] == "ready"}
+                    indexed_by_unit = {}
+                    if prior_ids and scope == "full_document":
+                        for excerpt in unit_excerpts([{"id": uid, "evidence_spans": by_id[uid]["evidence_spans"]}
+                                                      for uid in prior_ids & by_id.keys()], indexed_chunks):
+                            indexed_by_unit.setdefault(excerpt["unit_id"], []).append(excerpt)
+
+                    def rebind(row):
+                        uid = row["output"]["logical_id"]
+                        required = learning_plan["required_items"].get(uid, [])
+                        record = prepared.get(uid, {})
+                        if record.get("content_version") != by_id[uid]["content_version"]:
+                            return None
+                        _, _, anchors, _ = _source_material(by_id[uid], record,
+                                                            indexed_by_unit.get(uid, ()), required)
+                        return rebind_version(row, [asdict(anchor) for anchor in anchors], required,
+                                              learning_plan["unverifiable_source"].get(uid))
+
+                    versions = saved_versions(checkpoints, document, planned_units, rebind)
+                    previous_identities = {row["output"]["logical_id"]: row["identity"] for entry in checkpoints
+                                           if not same_source(entry, document) for row in entry["versions"]
+                                           if row["stage"] == "ready" and row.get("identity") and row["output"]["blocks"]}
+                    if previous_identities:
+                        reconciliation = reconcile_saved_units(
+                            planned_units, list(previous_identities.values()),
+                            {row["output"]["logical_id"] for row in versions if row.get("reconciled")},
+                        )
+                if prior_part:
+                    for previous in prior_part.get("sections", ()):
+                        uid = previous["id"]
+                        if (uid in learning_plan["order"] and not prepared.get(uid)
+                                and previous.get("content_version") == by_id[uid]["content_version"]):
+                            old_gaps = prior_part.get("learning_plan", {}).get("unverifiable_source", {}).get(uid)
+                            if old_gaps:
+                                learning_plan["unverifiable_source"][uid] = old_gaps
+                planned_units = [by_id[uid] for uid in learning_plan["order"]]
             parts, version = plan_course(
                 document, maps, indexed_chunks, scope == "full_document",
                 token_budget.capacity if token_budget else 16_000,
+                units=planned_units, batch_units=bool(learning_plan and token_budget and any(
+                    prepared.get(unit["logical_id"], {}).get("content_version") == unit["content_version"]
+                    for unit in planned_units
+                )),
             )
             part_index = prior_part["part"] if prior_part else 0
-            if prior_part and prior_part["version"] != version:
-                raise ValueError("The source or course plan changed. Start a new course explanation.")
+            if learning_plan:
+                version = learning_plan["fingerprint"]
+                if operation:
+                    known = latest_outputs(versions)
+                    if target_unit not in learning_plan["order"]:
+                        raise ValueError("That unit is unavailable in this explanation scope.")
+                    own = next((row["output"]["logical_id"] for row in reversed(versions)
+                                if row["request_id"] == state.get("request_id")), None)
+                    selected_unit = own or (
+                        target_unit if operation == "continue_learning" and target_unit in known
+                        and target_unit in learning_plan["order"] else next_unit(learning_plan, known, operation, target_unit)
+                    )
+                    if selected_unit is None:
+                        raise ValueError("All units in this scope have been generated.")
+                    part_index = next(index for index, group in enumerate(parts)
+                                      if any(item["id"] == selected_unit for item in group))
+                elif prior_part:
+                    part_index = resume_unit_part(parts, prior_part)
+            elif prior_part and prior_part["version"] != version:
+                if current_unit_map:
+                    part_index = resume_unit_part(parts, prior_part)
+                else:
+                    raise ValueError("The source or course plan changed. Start a new course explanation.")
             if part_index >= len(parts):
                 raise ValueError("No further course parts are available.")
             course_part = parts[part_index]
-            pages = {page for item in course_part for page in range(item["start"], item["end"] + 1)}
-            chunks = sorted((row for row in indexed_chunks if row["page_number"] in pages),
-                            key=lambda row: (row["page_number"], row.get("chunk_index") or 0))
+            if operation and learning_plan:
+                course_part = [item for item in course_part if item["id"] == selected_unit]
+            if current_unit_map:
+                try:
+                    supported = [item["id"] for item in course_part if not item.get("fallback")]
+                    for offset in range(0, len(supported), 5):
+                        await queue_unit_evidence(owner_id, document, supported[offset:offset + 5])
+                except Exception as exc:
+                    logger.warning("explain_preparation_queue_unavailable type=%s", type(exc).__name__)
+                chunks = list(unit_excerpts(course_part, indexed_chunks))
+                if learning_plan:
+                    scoped_ids = {item["id"] for item in course_part}
+                    peers = dict.fromkeys(peer for uid in scoped_ids for peer in
+                                          related_unit_ids(by_id[uid], current_unit_map["units"], prepared)
+                                          if peer not in scoped_ids)
+                    chunks.extend(unit_excerpts([{"id": peer, "evidence_spans": by_id[peer]["evidence_spans"]}
+                                                 for peer in peers], indexed_chunks))
+                if unit_event:
+                    await unit_event("prep_status", {"document_id": document_id,
+                                     "status": "ready" if all(item["id"] in prepared for item in course_part)
+                                     else "pending"})
+            else:
+                pages = {page for item in course_part for page in range(item["start"], item["end"] + 1)}
+                selected_chunks = (row for row in indexed_chunks if row["page_number"] in pages)
+                chunks = sorted(selected_chunks, key=lambda row: (row["page_number"], row.get("chunk_index") or 0))
         else:
             document_inventory = await asyncio.to_thread(build_inventory, indexed_chunks, scope)
             metrics.retrieval.update(
@@ -1319,6 +1860,84 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
             summary_limit = max(_BRIEF_OUTPUT_TOKENS, token_budget.policy.min_output_tokens)
             token_budget = replace(token_budget, max_output_tokens=min(token_budget.max_output_tokens, summary_limit))
     language = task.language if task else "French" if (state.get("language") or "en").lower().startswith("fr") else "English"
+    if learning_plan and (operation or checkpoint or any(
+            prepared.get(item["id"], {}).get("content_version") == item["content_version"] for item in course_part)):
+        language = intent.language
+        unit_map = current_unit_map["units"]
+        by_id = {unit["logical_id"]: unit for unit in unit_map}
+        previous = (prior_part or {}).get("sections", [])
+        known = latest_outputs(versions)
+        prior_facts = [fact for fact in ([fact for output in known.values() for fact in output["verified_facts"]]
+                       if checkpoint else (prior_part or {}).get("learning_plan", {}).get("facts_ledger", ()))
+                       if fact.get("unit_id") in by_id
+                       and by_id[fact["unit_id"]]["content_version"] == fact.get("content_version")
+                       and not learning_plan["unverifiable_source"].get(fact["unit_id"])
+                       and fact.get("verification") in {"deterministic_only", "reviewed"}]
+        continuity = [{"title": item["title"], "status": item["status"]} for item in previous
+                      if item["status"] in {"covered", "partial"}]
+        continuity.extend({"title": output["title"], "status": output["coverage"]} for output in known.values())
+        drafts = await _generate_course_units(
+            state, metrics, token_budget, [by_id[item["id"]] for item in course_part], prepared, chunks,
+            learning_plan, unit_map, language, overview=not prior_part, continuity=continuity, prior_facts=prior_facts,
+            versions=versions, deepen=target_unit if operation == "deepen_unit" else None,
+        )
+        card = legacy_projection(drafts, chunks, document_id, language)
+        results = {uid: ("covered" if draft["coverage"] == "explained" and draft["verification"] == "reviewed"
+                         else "mentioned" if draft["coverage"] == "mentioned" else "partial")
+                   for uid, draft in (known | {draft["logical_id"]: draft for draft in drafts if draft["blocks"]}).items()
+                   if uid in learning_plan["order"]}
+        progress = part_progress(parts, version, document_id, part_index, results, None if checkpoint else prior_part,
+                                 state.get("request_id"), language)
+        by_draft = known | {draft["logical_id"]: draft for draft in drafts if draft["blocks"]}
+        facts = list(prior_facts)
+        for item in progress["sections"]:
+            draft = by_draft.get(item["id"])
+            if draft:
+                item["missing_item_ids"] = draft["missing_item_ids"]
+                facts = [fact for fact in facts if fact.get("unit_id") != item["id"]] + draft["verified_facts"]
+            if checkpoint:
+                item["attempt"] = len({row["request_id"] for row in checkpoint.data["versions"] + versions
+                                       if row["stage"] == "ready" and row["output"]["logical_id"] == item["id"]})
+            if item["id"] in learning_plan["unverifiable_source"] and item["status"] == "covered":
+                item["status"] = "partial"
+        progress["counts"] = dict(Counter(item["status"] for item in progress["sections"]))
+        progress["learning_plan"] = learning_plan | learning_progress(
+            learning_plan, unit_map, {item["id"]: item for item in progress["sections"]},
+            (f"{state.get('session_id')}:{document['index_generation']}:{language}:"
+             f"{learning_plan['level']}:{learning_plan['depth']}" if checkpoint else
+             state.get("session_id") or state.get("request_id")), verified_facts=facts, prepared=prepared,
+            deepen_explained=bool(checkpoint),
+        )
+        progress.update(unit_map_version=current_unit_map["text_hash"], topic=topic)
+        if checkpoint:
+            progress["index_generation"] = document["index_generation"]
+            progress["source_hash"] = document["content_hash"]
+            if reconciliation:
+                progress["unit_reconciliation"] = reconciliation
+            actions = progress["learning_plan"]["next_actions"]
+            # Keep legacy Continue wired to the single next ungenerated unit.
+            progress["next_request_id"] = next((action["request_id"] for action in actions
+                                                if action["action"] == "continue_learning"), None)
+        if scope != "full_document" or (not checkpoint and any(draft["coverage"] == "not_generated" for draft in drafts)):
+            progress["next_request_id"] = None
+        card["course_progress"] = progress
+        if not prior_part:
+            card["unit_overview"] = [{"logical_id": uid, "title": by_id[uid]["title"]}
+                                     for uid in learning_plan["order"][:12]]
+        metrics.retrieval["coverage_missing"] = sum(len(draft["missing_item_ids"]) for draft in drafts)
+        own_versions = [row for row in checkpoint.data["versions"]] if checkpoint else [
+            version_for(state.get("request_id"), "ready", draft) for draft in drafts]
+        shown = [row for row in own_versions if row["stage"] == "ready"]
+        shown.extend(row for row in versions if row["stage"] == "ready"
+                     and row["output"] in drafts and row not in shown)
+        card = attach_contract(card, learning_plan, unit_map, versions + own_versions, shown,
+                               progress["learning_plan"], prepared)
+        # The legacy card has no "mentioned" label. Its v2 ledger keeps this distinction.
+        for item in card["course_progress"]["sections"]:
+            if item["status"] == "mentioned":
+                item["status"] = "partial"
+        card["course_progress"]["counts"] = dict(Counter(item["status"] for item in card["course_progress"]["sections"]))
+        return {**state, "explanation": card, "current_node": "explicateur"}
     profile = state.get("profile") or {}
     student_context = {
         "mastered_concepts": profile.get("mastered_concepts", []),
@@ -1349,14 +1968,25 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         source_context = [
             {"source_index": index, "filename": chunk.get("filename"),
              "page_number": chunk.get("page_number"), "content": chunk.get("content")}
+            | ({"unit_id": chunk["unit_id"]} if "unit_id" in chunk else {})
             for index, chunk in enumerate(excerpts, 1)
         ]
         public_headings = [{key: value for key, value in item.items() if key != "source_index"} for item in headings]
         checklist_context = ""
         if course_part:
             checklist_context = "\nCourse part sections (outline is a navigation aid, not source evidence): " + json.dumps(
-                course_part, ensure_ascii=False,
+                [{key: value for key, value in item.items() if key not in {"evidence_spans", "weight"}}
+                 for item in course_part], ensure_ascii=False,
             )
+            if learning_plan:
+                current_ids = {item["id"] for item in course_part}
+                checklist_context += "\nStudy scope metadata: " + json.dumps({
+                    "depth": learning_plan["depth"], "level": learning_plan["level"],
+                    "omit_proofs": learning_plan["omit_proofs"],
+                    "prereqs_assumed": learning_plan["prereqs_assumed"],
+                    "unverifiable_source": {uid: gaps for uid, gaps in learning_plan["unverifiable_source"].items()
+                                            if uid in current_ids},
+                }, ensure_ascii=False)
         if lab_inventory:
             excerpt_indexes = {str(chunk["id"]): index for index, chunk in enumerate(excerpts, 1)}
         if checklist:
@@ -1381,6 +2011,12 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
             )),
         ]
 
+    if metrics.call_budget is not None:
+        # Count the observable evidence pool once, before prompt trimming and exercise batching.
+        metrics.evidence_candidates = len({
+            str(row["id"]) if row.get("id") else id(row)
+            for row in (*retrieved_chunks, *indexed_chunks, *chunks)
+        })
     evidence_limited = False
     if token_budget:
         def fits(rows):
@@ -1452,6 +2088,10 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         response_schema=_response_schema(task), single_attempt=True,
     )
     budget = _GenerationBudget()
+    if metrics.call_budget is not None:
+        primary_calls = max(1, min(len(groups), cap))
+        repair_calls = int(bool(document_inventory and coverage_enabled and not brief and not adaptive))
+        metrics.call_budget.learning_limit = min(metrics.call_budget.learning_limit, primary_calls + 1 + repair_calls)
     evidence_ids: set[str] = set()
     if targets:
         parts: list[GeneratedExplanation] = []
@@ -1495,7 +2135,7 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
                     model, section_prompt, excerpts, section_preview if preview else None,
                     progress, state, metrics, budget, task, token_budget,
                 )
-            except _ExplainTokenBudgetError:
+            except (_ExplainTokenBudgetError, ExplainCallLimit):
                 if not parts:
                     raise
                 omitted = [item for remaining in groups[index:] for item in remaining]
@@ -1621,10 +2261,51 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
     if course_part:
         results = assess_part(course_part, explanation, chunks, document_id,
                               scope == "full_document" and not evidence_limited)
-        metrics.retrieval.update(course_part=part_index + 1, course_total_parts=len(parts),
-                                 coverage_missing=sum(status != "covered" for status in results.values()))
+        if learning_plan:
+            for unit_id in learning_plan["unverifiable_source"]:
+                if results.get(unit_id) == "covered":
+                    results[unit_id] = "partial"
+        if current_unit_map:
+            findings = []
+            for index, section in enumerate(explanation.sections):
+                targets = set(section.covers or []) & results.keys()
+                if not targets:
+                    cited = {citation.page_number for citation in (section.citations or [])
+                             if str(citation.document_id) == document_id}
+                    targets = {item["id"] for item in course_part
+                               if any(item["start"] <= page <= item["end"] for page in cited)}
+                if len(targets) == 1:
+                    unit_id = next(iter(targets))
+                    detected = structure_findings(section.content, unit_id, current_unit_map["units"],
+                                                  block_id=f"section-{index + 1}")
+                    if detected and results[unit_id] == "covered":
+                        results[unit_id] = "partial"
+                    findings.extend(detected)
+            if findings:
+                card["deterministic_findings"] = [asdict(finding) for finding in findings]
+        assessed = [status for status in results.values() if status != "unverifiable"] if current_unit_map else []
+        misses = sum(status != "covered" for status in assessed) if assessed else None
+        metrics.retrieval.update(
+            course_part=part_index + 1, course_total_parts=len(parts),
+            coverage_missing=misses if current_unit_map else sum(status != "covered" for status in results.values()),
+        )
         card["course_progress"] = part_progress(parts, version, document_id, part_index, results, prior_part,
                                                  state.get("request_id"), language)
+        if unit_pipeline_enabled():
+            metrics.retrieval.update(unit_assessed_count=len(assessed), unit_coverage_missing=misses)
+        if current_unit_map:
+            card["course_progress"]["unit_map_version"] = current_unit_map["text_hash"]
+        if learning_plan:
+            progress = card["course_progress"]
+            # Guard restored legacy statuses, too, when a current source gap is known.
+            for item in progress["sections"]:
+                if item["status"] == "covered" and item["id"] in learning_plan["unverifiable_source"]:
+                    item["status"] = "partial"
+            progress["counts"] = dict(Counter(item["status"] for item in progress["sections"]))
+            progress["learning_plan"] = learning_plan | learning_progress(
+                learning_plan, current_unit_map["units"], {item["id"]: item for item in progress["sections"]},
+                state.get("session_id") or state.get("request_id"), prepared=prepared,
+            )
         card["course_progress"]["topic"] = topic
         if scope != "full_document":
             card["course_progress"]["next_request_id"] = None

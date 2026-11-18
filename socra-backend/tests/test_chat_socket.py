@@ -21,11 +21,12 @@ from graph import nodes
 
 SOURCE = {"id": "chunk", "document_id": str(uuid4()), "filename": "fixture.pdf",
           "page_number": 3, "content": "A model is a simplified representation.", "similarity": 0.9}
+LEASE = str(uuid4())
 
 
 @asynccontextmanager
 async def lease(*_):
-    yield True
+    yield LEASE
 
 
 class SocketTests(unittest.TestCase):
@@ -79,6 +80,182 @@ class SocketTests(unittest.TestCase):
         self.assertEqual(self.until(socket, "done")[-1]["content"]["code"], "REQUEST_RATE_LIMITED")
         self.assertFalse(self.rows)
         self.quota.assert_awaited_once_with("owner", "explain")
+
+    def test_document_v3_uses_fenced_finalization_and_replays_the_same_markdown(self):
+        from agents import explain_document
+        from tests.test_educational_document import FixtureProvider, MemoryCheckpoint, source
+
+        bundle = source([{"text": "Part 1 – Model\nExercise A – Validation\nA reliable validation protocol."}])
+        provider = FixtureProvider()
+        self.enterContext(patch.dict(os.environ, {"EXPLAIN_DOCUMENT_MODE": "true",
+                                                 "SOCRA_EXPLAIN_REVIEW_MODEL": "gemini-3.5-flash-lite"}))
+        self.enterContext(patch.object(explain_document, "_load_source", AsyncMock(return_value=bundle)))
+        self.enterContext(patch.object(explain_document, "get_chat_llm", provider.model))
+        current = self.enterContext(patch.object(websocket, "source_is_current", return_value=True))
+        calls = []
+
+        class Checkpoint(MemoryCheckpoint):
+            def __init__(self, inquiry, course, owner, request, prompt, *, lease):
+                super().__init__()
+                assert lease == LEASE
+                self.inquiry = inquiry
+                self.request = request
+
+            async def finalize(inner, content, metadata):
+                calls.append(metadata["explanation"])
+                return self.save(inner.inquiry, "assistant", content, metadata)
+
+        self.enterContext(patch.object(websocket, "TurnCheckpoint", Checkpoint))
+        socket = self.connect()
+        message = "Solve Part 1 of this lab."
+        request = self.send(socket, mode="explain", message=message, model="gemini-3.5-flash-lite", provider="google")
+        events = self.until(socket, "done")
+        snapshots = [event["content"] for event in events if event["type"] == "document_snapshot"]
+        self.assertTrue(any(card["sections"] for card in snapshots))
+        final = next(event["content"]["card"] for event in events if event["type"] == "card_ready")
+        self.assertEqual(calls, [final])
+        self.assertEqual(final["state"], "approved")
+        self.assertTrue(all(card["document_id"] == final["document_id"] for card in snapshots))
+        self.assertEqual(self.rows[("assistant", request)]["metadata"]["explanation"], final)
+        socket.close()
+        socket = self.connect()
+        options = dict(mode="explain", request=request, message=message, model="gemini-3.5-flash-lite", provider="google")
+        self.send(socket, **options)
+        replay = next(event["content"]["card"] for event in self.until(socket, "done") if event["type"] == "card_ready")
+        self.assertEqual(replay, final)
+        current.return_value = False
+        self.send(socket, **options)
+        archived = next(event["content"]["card"] for event in self.until(socket, "done") if event["type"] == "card_ready")
+        self.assertEqual(archived, final | {"historical_source": True})
+        self.assertEqual(provider.calls, ["plan", "generate", "review"])
+
+    def test_unit_progress_restore_after_reconnect_uses_owned_current_checkpoint(self):
+        from db.explain_progress import KEY
+
+        reference = str(uuid4())
+        self.enterContext(patch.dict(os.environ, {"EXPLAIN_UNIT_PIPELINE": "true"}))
+        anchor = {"document_id": SOURCE["document_id"], "source_hash": "text", "generation": 2}
+        row = {"stage": "ready", "output": {"logical_id": "shap", "coverage": "partial"},
+               "change_log": [{"old_quote": "old", "new_quote": "new", "severity": "high"}]}
+        self.save(self.session, "user", "Study SHAP",
+                  {"request_id": reference, KEY: anchor | {"versions": [row]}})
+        source = self.enterContext(patch.object(websocket, "source_is_current", return_value=True))
+        socket = self.connect()
+        socket.close()
+        socket = self.connect()
+        self.send(socket, mode="explain", action="restore_unit_progress", fromRequestId=reference)
+        events = self.until(socket, "done")
+        ready = next(event for event in events if event["type"] == "unit_ready")
+        self.assertTrue(ready["content"]["replayed"])
+        correction = next(event for event in events if event["type"] == "unit_correction")
+        self.assertEqual(correction["content"]["severity"], "high")
+        self.assertLess(ready["sequence"], correction["sequence"])
+        self.quota.assert_not_called()
+        self.assertEqual(source.call_args.args[1:], (self.course, "owner"))
+        source.return_value = False
+        self.send(socket, mode="explain", action="restore_unit_progress", fromRequestId=reference)
+        self.assertEqual(self.until(socket, "done")[-1]["type"], "error")
+        self.load.return_value = None
+        self.load.side_effect = None
+        self.send(socket, mode="explain", action="restore_unit_progress", fromRequestId=reference)
+        self.assertEqual(self.until(socket, "done")[-1]["type"], "error")
+        self.assertEqual(source.call_count, 2)
+
+    def test_v2_unit_card_and_legacy_continue_use_the_actual_chat_graph(self):
+        from agents import explicateur
+        from db.explain_progress import KEY
+        from tests.test_explain_unit_generation import block, records_for
+
+        units, raw, evidence = records_for([
+            {"text": "II.1 SHAP\nShapley averages marginal contributions across variable orders."},
+            {"text": "II.2 LIME\nLIME weights nearby observations to fit a local explanation."},
+        ])
+        document = {"id": SOURCE["document_id"], "filename": "Course.pdf", "page_count": 2,
+                    "content_hash": "hash", "index_generation": 4}
+        rows = [SOURCE | row for row in raw]
+        self.enterContext(patch.dict(os.environ, {"EXPLAIN_UNIT_PIPELINE": "true", "EXPLAIN_INTENT_PLANS": "true",
+                                                  "SOCRA_EXPLAIN_UNIT_MAX_LEARNING_CALLS": "1"}))
+        for name, result in {"retrieve_summary_guided_chunks": rows, "course_documents": [document],
+                             "document_inventory_chunks": (rows, "full_document"),
+                             "load_or_queue_unit_map": {"text_hash": "map", "units": units},
+                             "load_prepared_evidence": evidence, "queue_unit_evidence": None}.items():
+            self.enterContext(patch.object(explicateur, name, AsyncMock(return_value=result)))
+
+        reject = threading.Event()
+
+        def persist(name, params):
+            self.assertEqual(name, "append_explain_checkpoint")
+            self.assertEqual(params["p_lease"], LEASE)
+            self.assertEqual(params["p_document"], document["id"])
+            self.assertEqual(params["p_generation"], document["index_generation"])
+            self.assertEqual(params["p_source_hash"], document["content_hash"])
+            request = params["p_request"]
+            prompt = self.rows[("user", request)]
+            self.assertEqual(prompt["id"], params["p_message"])
+            data = prompt["metadata"].get(KEY)
+            self.assertEqual((data or {}).get("revision"), params["p_expected_revision"])
+            if reject.is_set():
+                return False
+            if final := params["p_final"]:
+                return self.save(self.session, "assistant", final["content"], final["metadata"])
+            if data is None:
+                data = {"request_id": request, "document_id": document["id"], "source_hash": document["content_hash"],
+                        "generation": document["index_generation"], "revision": 0, "versions": [], "calls": []}
+                prompt["metadata"][KEY] = data
+            data["revision"] += 1
+            if params["p_call"]:
+                data["calls"].append(params["p_call"])
+            if params["p_version"]:
+                data["versions"].append(params["p_version"])
+            return True
+
+        client = Mock()
+        client.rpc.side_effect = lambda name, params: Mock(
+            retry=Mock(return_value=Mock(execute=lambda: SimpleNamespace(data=persist(name, params))))
+        )
+        self.enterContext(patch("db.explain_progress.get_supabase", return_value=client))
+        self.enterContext(patch("db.explain_progress.load_checkpoints",
+                                side_effect=lambda *_: [row["metadata"][KEY] for row in self.rows.values()
+                                                        if KEY in row["metadata"]]))
+        self.enterContext(patch.object(websocket, "source_is_current", return_value=True))
+
+        async def stream(messages):
+            quote = json.loads(messages[-1].content)["sources"][0]["quote"]
+            yield AIMessageChunk(content=json.dumps({"blocks": [block("explanation", quote, [1])]}))
+
+        model = self.enterContext(patch.object(explicateur, "get_chat_llm", return_value=SimpleNamespace(astream=stream)))
+        socket = self.connect()
+        request = self.send(socket, mode="explain", message="Teach me the entire course, all chapters in order.")
+        events = self.until(socket, "done")
+        types = [event["type"] for event in events]
+        for earlier, later in zip(["prep_status", "unit_draft", "unit_checking", "unit_ready"],
+                                  ["unit_draft", "unit_checking", "unit_ready", "card_ready"]):
+            self.assertLess(types.index(earlier), types.index(later))
+        first = self.rows[("assistant", request)]["metadata"]["explanation"]
+        self.assertEqual(first["schema_version"], 2)
+        self.assertEqual(first["sections"][0]["citations"][0]["page_number"], 1)
+
+        socket.close()
+        socket = self.connect()
+        continuation = first["course_progress"]["next_request_id"]
+        self.send(socket, mode="explain", request=continuation, continueCourseFrom=request)
+        self.assertEqual(self.until(socket, "done")[-1]["type"], "done")
+        next_card = self.rows[("assistant", continuation)]["metadata"]["explanation"]
+        self.assertEqual([item["logical_id"] for item in next_card["units"]], [units[1]["logical_id"]])
+        self.send(socket, mode="explain", request=continuation, continueCourseFrom=request)
+        self.assertTrue(any(event["type"] == "unit_ready" and event["content"]["replayed"]
+                            for event in self.until(socket, "done")))
+        self.assertEqual(model.call_count, 2)
+        deepen = next(action for action in first["learning_state"]["next_actions"]
+                      if action["action"] == "deepen_unit")
+        reject.set()
+        self.send(socket, mode="explain", action="deepen_unit", request=deepen["request_id"],
+                  fromRequestId=request, unitId=deepen["logical_id"])
+        error = self.until(socket, "done")[-1]
+        self.assertEqual(error["content"]["code"], "EXPLAIN_CHECKPOINT_REJECTED")
+        self.assertEqual(model.call_count, 2)
+        self.assertNotIn(("assistant", deepen["request_id"]), self.rows)
+        self.assertNotIn(KEY, self.rows[("user", deepen["request_id"])]["metadata"])
 
     def test_notebook_chat_streams_and_replays_without_reloading_changed_selection(self):
         note_id = str(uuid4())

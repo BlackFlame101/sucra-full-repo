@@ -5,7 +5,7 @@ import test from "node:test"
 import React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import ts from "typescript"
-import { explanationFixtures, python } from "./explanation-card-fixtures.mjs"
+import { documentFixture, explanationFixtures, instructionalFixture, phase7Fixture, python } from "./explanation-card-fixtures.mjs"
 
 const require = createRequire(import.meta.url)
 const modules = new Map()
@@ -39,6 +39,458 @@ const { StudyMarkdown } = load("components/notebook/NotebookReply.tsx")
 const { explanationNoteText } = load("lib/ai/explanation-note.ts")
 const { readNoteDocument, noteText } = load("lib/notebook/document.ts")
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props))
+const {
+  applyExplanationEvent, explanationUnits, explanationV2, inquiryExplanationUnits, restoreExplanationTurns,
+  supportedUnitActions, unitPresentation,
+} = load("lib/explanation-v2.ts")
+const { parseServerMessage } = load("lib/socra-ws.ts", {
+  "./explanation-v2": load("lib/explanation-v2.ts"), "./educational-document": load("lib/educational-document.ts"),
+})
+const { ExplanationUnit } = load("components/chat/ExplanationUnit.tsx")
+const { explanationDocument } = load("lib/explanation-document.ts")
+const { LiveExplanation } = load("components/chat/LiveExplanation.tsx")
+const { unitActivityKey, requirementActivityId } = load("components/chat/UnitActivity.tsx")
+
+test("live structured snapshots keep the draft visible through checking and render actual ready coverage", () => {
+  const { card, checking } = documentFixture("course")
+  const requestId = checking.request_id
+  const prep = applyExplanationEvent(undefined, { type: "prep_status", content: { document_id: checking.document_id, status: "loading" } }, 1)
+  const draft = applyExplanationEvent(prep, { type: "unit_draft", content: checking }, 2)
+  const checked = applyExplanationEvent(draft, { type: "unit_checking", content: checking.output }, 3)
+  assert.match(render(LiveExplanation, { french: true, turn: { requestId, stream: prep } }), /Préparation des sources/)
+  const draftHtml = render(LiveExplanation, { french: true, turn: { requestId, stream: draft } })
+  assert.match(draftHtml, /Génération/)
+  const checkingHtml = render(LiveExplanation, { french: true, turn: { requestId, stream: checked } })
+  assert.match(checkingHtml, /Vérification/)
+  assert.match(checkingHtml, /Provisoire/)
+  assert.match(checkingHtml, /Leakage occurs/)
+  assert.doesNotMatch(checkingHtml, /Relu indépendamment|Vérification terminée/)
+  const ready = { ...checking, stage: "ready", output: { ...checking.output, coverage: "not_generated", blocks: [], interruptions: ["call_budget"] } }
+  const after = applyExplanationEvent(checked, { type: "unit_ready", content: ready }, 4)
+  const readyHtml = render(LiveExplanation, { french: true, turn: { requestId, stream: after } })
+  assert.match(readyHtml, /À venir/)
+  assert.match(readyHtml, /Limite de génération atteinte/)
+  assert.match(readyHtml, /Vérification terminée/)
+  assert.doesNotMatch(readyHtml, /✓ Expliquée?|Relu indépendamment/)
+  const interruption = render(LiveExplanation, { french: true, turn: { requestId, stream: { ...checked, interrupted: true, failed: true } } })
+  assert.match(interruption, /La génération s’est arrêtée/)
+  assert.doesNotMatch(interruption, /Limite de génération/)
+  const linked = explanationDocument(card, { live: { requestId, stream: checked } })
+  assert.equal(linked.units.get(checking.output.logical_id).lifecycle, "checking")
+  assert.equal(linked.counts.explained, 2)
+})
+
+test("a systemic provider corruption stop explains why the text could not be retained", () => {
+  const { card } = documentFixture("course")
+  const [unit, ...rest] = card.units
+  const explanation = { ...card, units: [{ ...unit, blocks: [], coverage: "not_generated",
+    interruptions: ["systemic_generation_failure", "provider_text_corruption"] }, ...rest] }
+  assert.match(render(ExplanationCard, { explanation }),
+    /Le fournisseur a renvoyé du texte corrompu\. L’explication concernée n’a pas pu être conservée/)
+  assert.match(render(ExplanationCard, { explanation: { ...explanation, language: "English" } }),
+    /The provider returned corrupted text\. The affected explanation could not be safely retained\./)
+})
+
+test("high-severity corrections keep quotations, source references and earlier versions accessible", () => {
+  const card = instructionalFixture("concept")
+  const [current] = card.versions
+  const [block] = current.output.blocks
+  const earlier = { ...current, stage: "draft", output: { ...current.output, coverage: "partial", verification: "unreviewed",
+    blocks: [{ ...block, text: "Original educational text." }] } }
+  const change = { block_id: block.block_id, reason: "review_repair", severity: "high",
+    old_quote: "Earlier claim.", new_quote: "Corrected claim." }
+  const corrected = { ...current, change_log: [change] }
+  const explanation = { ...card, versions: [corrected] }
+  const turn = { requestId: current.request_id, stream: { versions: [earlier, corrected], corrections: [], checking: [] } }
+  const html = render(ExplanationCard, { explanation, unitContext: { turn } })
+  assert.match(html, /<details open=""[^>]*>.*Contenu corrigé/)
+  assert.match(html, /<del>Earlier claim\.<\/del>/)
+  assert.match(html, /<ins[^>]*>Corrected claim\.<\/ins>/)
+  assert.match(html, /Correction après relecture/)
+  assert.match(html, /Historique des versions.*Version antérieure.*Original educational text/)
+  assert.match(html, /page=12#page=12/)
+})
+
+test("Deepen keeps the existing answer readable until an exact-source replacement is ready", () => {
+  const { card } = documentFixture("course")
+  const original = card.versions.find(({ output }) => output.coverage === "partial")
+  const next = { ...original, request_id: "deepen-live", stage: "draft", output: { ...original.output,
+    blocks: [{ ...original.output.blocks[0], text: "New provisional reasoning." }] } }
+  const turn = { requestId: next.request_id, stream: { versions: [next], checking: [next.output], corrections: [] } }
+  const id = original.output.logical_id
+  const during = explanationDocument(card, { live: turn }).units.get(id)
+  assert.deepEqual(during.output.blocks, original.output.blocks)
+  assert.equal(during.provisionalVersion.output.blocks[0].text, "New provisional reasoning.")
+  const ready = { ...next, stage: "ready" }
+  const after = explanationDocument(card, { live: { ...turn, stream: { ...turn.stream, versions: [next, ready] } } }).units
+  assert.equal(after.get(id).output.blocks[0].text, "New provisional reasoning.")
+  assert.equal([...after.values()].filter((unit) => unit.id === id).length, 1)
+  assert.ok(after.get(id).history.some((row) => row.request_id === original.request_id))
+})
+
+test("activity is scoped to the owner, source generation and requirement without changing the verdict", () => {
+  const { card } = documentFixture("lab")
+  const [unit] = card.units
+  const scope = { ownerId: "student-a", documentId: "pdf", generation: 3, sourceHash: "hash" }
+  const key = unitActivityKey(scope, unit, "read")
+  assert.notEqual(key, unitActivityKey({ ...scope, ownerId: "student-b" }, unit, "read"))
+  assert.notEqual(key, unitActivityKey({ ...scope, generation: 4 }, unit, "read"))
+  assert.notEqual(requirementActivityId("checkpoint", "save a workflow"), requirementActivityId("checkpoint", "save three workflows"))
+  assert.equal(unitActivityKey({ ...scope, ownerId: undefined }, unit, "read"), "")
+  const html = render(ExplanationCard, { explanation: card, ownerId: scope.ownerId })
+  assert.match(html, /Marquer comme relu/)
+  assert.match(html, /J’ai effectué ce contrôle/)
+  assert.match(html, /J’ai produit ce livrable/)
+  assert.match(html, /1 sur 4 étapes expliquées/)
+  assert.doesNotMatch(render(ExplanationCard, { explanation: card, ownerId: scope.ownerId, readOnly: true }), /type="checkbox"/)
+  const stale = render(ExplanationCard, { explanation: { ...card, historical_source: true }, ownerId: scope.ownerId, onUnitAction: () => {} })
+  assert.match(stale, /version historique/)
+  assert.doesNotMatch(stale, /data-coverage-total|type="checkbox"|Continuer :|href="\/api\/documents\/view/)
+})
+
+const instructionalKinds = ["concept", "derivation", "worked_calculation", "comparison", "figure_walkthrough",
+  "rule_examples", "exercise", "lab_step", "research_finding"]
+
+test("all nine instructional kinds render their supplied blocks without repeating the legacy projection", () => {
+  for (const kind of instructionalKinds) {
+    const explanation = instructionalFixture(kind)
+    const html = render(ExplanationCard, { explanation })
+    assert.ok(html.includes(`data-explanation-unit="${kind}"`), kind)
+    for (const block of explanation.units[0].blocks) {
+      assert.ok(html.includes(`data-explanation-block="${block.kind}"`), `${kind}/${block.kind}`)
+    }
+    assert.doesNotMatch(html, /Legacy projection marker|Legacy sample content/)
+  }
+  const concept = render(ExplanationCard, { explanation: instructionalFixture("concept") })
+  inOrder(concept, "Leakage occurs", "Imagine reading", "Training", "Fit preprocessing")
+  const derivation = render(ExplanationCard, { explanation: instructionalFixture("derivation") })
+  assert.match(derivation, /<ol[^>]*>.*Write the reciprocal sum/)
+  assert.match(derivation, /class="katex-display"/)
+  const calculation = render(ExplanationCard, { explanation: instructionalFixture("worked_calculation") })
+  assert.match(calculation, /class="katex-display"/)
+  assert.doesNotMatch(calculation, /<pre/)
+  const comparison = render(ExplanationCard, { explanation: instructionalFixture("comparison") })
+  assert.match(comparison, /overflow-x-auto[^>]*>\s*<table/)
+  inOrder(comparison, "Method A", "Method B", "Method C", "Local", "Global", "Both")
+  const lab = render(ExplanationCard, { explanation: instructionalFixture("lab_step") })
+  assert.match(lab, /Copier le code/)
+  inOrder(lab, "Get-Content", "Résultat attendu", "Point de contrôle")
+  assert.doesNotMatch(lab, /<input/)
+  assert.match(render(ExplanationCard, { explanation: instructionalFixture("exercise") }), /Copier la réponse/)
+})
+
+test("structured provenance and page links are bound to valid block anchors", () => {
+  const { units: [output], versions: [version] } = instructionalFixture("rule_examples")
+  const html = render(ExplanationUnit, { output, identity: version.identity, documentId: "right-document", french: true })
+  inOrder(html, "Source example.", "/api/documents/view/right-document?page=12#page=12",
+    "Explication Socra, hors du PDF", "Exemple hypothétique de Socra, pas le calcul du PDF", "Additional example.")
+  const bad = { ...output, blocks: [{ ...output.blocks[0], source_indexes: [0, 2, 1.5] }] }
+  assert.doesNotMatch(render(ExplanationUnit, { output: bad, documentId: "right-document", french: true }), /href=|Sources du bloc/)
+  const wrongOffset = { ...output, sources: [{ page: 3, start: 20, end: 5, quote: "Bad" }] }
+  assert.doesNotMatch(render(ExplanationUnit, { output: wrongOffset, documentId: "right-document", french: true }), /href=/)
+  const checkedFixture = instructionalFixture("worked_calculation")
+  checkedFixture.units[0].blocks.find(block => block.kind === "calculation").calculation = { expression: "9/12", expected: 0.75 }
+  const checked = render(ExplanationCard, { explanation: checkedFixture })
+  assert.match(checked, /Dérivé · recalculé/)
+  assert.doesNotMatch(render(ExplanationCard, { explanation: instructionalFixture("lab_step") }), /Dérivé · recalculé/)
+})
+
+test("unverified readings, readiness, coverage and review remain distinct", () => {
+  const fixture = instructionalFixture("figure_walkthrough")
+  const html = render(ExplanationCard, { explanation: fixture })
+  for (const label of ["Source non vérifiable", "p. 12", "Non vérifié", "Non relue", "◐ Partiel",
+    "Valeurs lues sur le graphique : approximatives", "Éléments manquants (1)"]) assert.ok(html.includes(label), label)
+  assert.match(html, /page=12#page=12/)
+  assert.doesNotMatch(html, /<img|✓ Expliqué|Relu indépendamment/)
+  const [output] = fixture.units
+  const props = { french: true, output: { ...output, coverage: "explained", verification: "review_failed",
+    unverifiable_source: [], missing_item_ids: [] } }
+  assert.match(render(ExplanationUnit, props), /✓ Expliqué.*Non relue/)
+  assert.match(render(ExplanationUnit, { ...props, output: { ...props.output, coverage: "partial", verification: "reviewed" } }),
+    /◐ Partiel.*Relu indépendamment/)
+  const unavailable = render(ExplanationUnit, { ...props, output: { ...props.output, coverage: "not_generated",
+    verification: "unreviewed", blocks: [] } })
+  assert.match(unavailable, /À venir/)
+  assert.doesNotMatch(unavailable, /Expliqué|data-explanation-block=/)
+})
+
+test("Spark lab checks and independent review preserve the backend's draft and ready states", () => {
+  const fixture = instructionalFixture("lab_step")
+  const [output] = fixture.units
+  const [version] = fixture.versions
+  const draft = { ...output, coverage: "partial", review_state: "incomplete",
+    lab_verification: { checks: { runtime_qualification: false, source_grounding: false, control_characters: true } } }
+  const renderUnit = (output, stage) => render(ExplanationUnit, { output, identity: version.identity, french: true, stage })
+  const incomplete = renderUnit(draft)
+  assert.match(incomplete, /Contrôles automatiques.*1\/3.*Relecture incomplète.*Brouillon/)
+  assert.match(incomplete, /Version relevée à l’exécution.*Échec/)
+  assert.doesNotMatch(incomplete, /Approuvé|Score pédagogique/)
+  const approved = renderUnit({ ...draft, review_state: "approved", verification: "reviewed",
+    lab_verification: { checks: { runtime_qualification: true, source_grounding: true, control_characters: true } },
+    independent_review: { pedagogy_score: 2, lab_evidence: [{ quote: "Deux threads sur un seul poste." }] } }, "ready")
+  for (const label of ["3/3", "Approuvé", "Prêt", "Score pédagogique", "Éléments de preuve de la relecture",
+    "Deux threads sur un seul poste."]) assert.ok(approved.includes(label), label)
+})
+
+test("a saved partial stream reports the interruption instead of ongoing generation", () => {
+  const saved = instructionalFixture("lab_step")
+  const [output] = saved.units
+  saved.units[0] = { ...output, coverage: "partial", interruptions: ["provider_failure"] }
+  const html = render(LiveExplanation, { french: true, turn: {
+    requestId: "interrupted", saved, stream: { versions: [], checking: [], corrections: [] },
+  } })
+  assert.match(html, /Génération interrompue/)
+  assert.doesNotMatch(html, /Génération du contenu|Vérification du contenu/)
+})
+
+test("both beeswarm source gaps remain visible without fabricated findings", () => {
+  const [output] = instructionalFixture("figure_walkthrough").units
+  const html = render(ExplanationUnit, { output: { ...output, blocks: [], sources: [], missing_item_ids: [],
+    unverifiable_source: [
+      { page: 18, status: "unverifiable_source", label: "Libellés et valeurs des variables du graphique" },
+      { page: 18, status: "unverifiable_source", label: "Libellé de l’axe horizontal du graphique" },
+    ] }, french: true })
+  inOrder(html, "Source non vérifiable", "p. 18", "Libellés et valeurs des variables du graphique",
+    "Libellé de l’axe horizontal du graphique")
+  assert.doesNotMatch(html, /Éléments manquants|data-explanation-block=/)
+})
+
+test("optional, unknown and non-teaching blocks stay readable without empty sections", () => {
+  const { units: [output], versions: [version] } = instructionalFixture("concept")
+  const withBlocks = { ...output, blocks: [
+    { ...output.blocks[0], kind: "intuition", text: " " },
+    { ...output.blocks[1], kind: "constructor", text: "A new instructional block." },
+  ] }
+  const props = { output: withBlocks, identity: { ...version.identity, kind: "future_kind" }, french: true }
+  const html = render(ExplanationUnit, props)
+  assert.match(html, /data-explanation-unit="unknown".*A new instructional block/)
+  assert.doesNotMatch(html, /Intuition|Copier la réponse/)
+  const recap = render(ExplanationUnit, { ...props, identity: { ...version.identity, kind: "summary" } })
+  assert.match(recap, /<details><summary/)
+  assert.doesNotMatch(recap, /✓ Expliqué|Relu indépendamment/)
+  const transition = render(ExplanationUnit, { ...props, identity: { ...version.identity, kind: "transition" } })
+  assert.match(transition, /data-explanation-unit="non_teaching"/)
+  assert.doesNotMatch(transition, /<details>|A new instructional block/)
+})
+
+test("Phase 7 payloads retain backend progress, provenance, sources and unknown extensions", () => {
+  for (const scenario of ["course", "exercises", "lab"]) {
+    const { card, draft } = phase7Fixture(scenario)
+    const parsed = explanationV2({ ...card, additional_field: { future: true } })
+    assert.deepEqual(parsed.additional_field, { future: true })
+    assert.equal(parsed.units[0].blocks[1].hypothetical, true)
+    assert.equal(parsed.units[0].blocks[1].provenance, "supplementary")
+    assert.equal(parsed.units[0].sources[parsed.units[0].blocks[0].source_indexes[0] - 1].page, 1)
+    assert.deepEqual(parsed.coverage_ledger.low_fidelity_pages, [1])
+    const message = (content) => JSON.stringify({
+      type: "unit_draft", content, session_id: "session", request_id: draft.request_id, sequence: 3,
+    })
+    const withoutOptional = { ...draft }
+    delete withoutOptional.change_log
+    assert.deepEqual(parseServerMessage(message(withoutOptional)).content, withoutOptional)
+    assert.equal(parseServerMessage(message({ ...withoutOptional, output: { ...draft.output, blocks: null } })), null)
+    assert.equal(parsed.versions[0].document_id, card.course_progress.document_id)
+    assert.equal(parsed.versions[0].generation, 4)
+    assert.equal(supportedUnitActions(parsed)[0].logical_id, parsed.coverage_ledger.remaining[0].logical_id)
+    if (scenario === "exercises") assert.equal(parsed.learning_state.progress[2].scope_reason, "exercise_excluded")
+  }
+  assert.equal(unitPresentation("new_kind"), "unknown")
+  for (const kind of ["transition", "front_matter", "summary"]) assert.equal(unitPresentation(kind), "non_teaching")
+  for (const kind of ["concept", "derivation", "worked_calculation", "comparison", "figure_walkthrough",
+    "rule_examples", "exercise", "lab_step", "research_finding"]) assert.equal(unitPresentation(kind), kind)
+})
+
+test("saved checkpoint and assistant metadata merge with replay and retain corrected version history", () => {
+  const { card, draft, snapshot, change } = phase7Fixture()
+  const request_id = draft.request_id
+  const prompt = { id: "prompt", role: "user", metadata: { request_id, explain_unit_checkpoint: snapshot } }
+  const assistant = { id: "saved", role: "assistant", metadata: { request_id, explanation: card } }
+  const legacy = { id: "old", role: "assistant", metadata: { explanation: explanationFixtures.standard } }
+  const [interrupted] = restoreExplanationTurns([prompt]).values()
+  assert.equal(interrupted.stream.interrupted, true)
+  assert.equal(interrupted.stream.versions.length, snapshot.versions.length)
+  assert.equal(interrupted.stream.calls, undefined)
+  const ready = card.versions[0]
+  const replay = applyExplanationEvent(undefined, { type: "unit_ready", content: { ...ready, replayed: true } })
+  const turns = restoreExplanationTurns([legacy, prompt, { ...assistant,
+    metadata: { ...assistant.metadata, explanationStream: replay } }])
+  assert.equal(turns.size, 1)
+  assert.equal(explanationV2(legacy.metadata.explanation), undefined)
+  const turn = turns.get(request_id)
+  const [unit] = explanationUnits(turn)
+  assert.equal(turn.messageId, "saved")
+  assert.equal(turn.saved.coverage_ledger.coverage_counts.partial, 1)
+  assert.equal(unit.lifecycle, "corrected")
+  assert.equal(unit.current.output.coverage, "partial")
+  assert.equal(unit.current.output.verification, "review_failed")
+  assert.deepEqual(unit.current.output.missing_item_ids, draft.output.missing_item_ids)
+  assert.deepEqual(unit.current.output.unverifiable_source, draft.output.unverifiable_source)
+  assert.equal(unit.versions.length, 2)
+  assert.deepEqual(unit.corrections, [change])
+})
+
+test("checking and correction events reconcile regardless of ordering and remain scoped by request", () => {
+  const { card, draft, change } = phase7Fixture("lab")
+  const requestId = draft.request_id
+  const ready = { ...card.versions[0], change_log: [] }
+  const checking = applyExplanationEvent(undefined, { type: "unit_checking", content: draft.output })
+  const drafting = applyExplanationEvent(checking, { type: "unit_draft", content: draft })
+  assert.equal(explanationUnits({ requestId, stream: drafting })[0].lifecycle, "checking")
+  assert.equal(explanationUnits({ requestId, stream: { ...drafting, interrupted: true } })[0].lifecycle, "interrupted")
+  const completed = applyExplanationEvent(drafting, { type: "unit_ready", content: ready })
+  const correction = { type: "unit_correction", content: { ...change, logical_id: ready.output.logical_id,
+    content_version: ready.output.content_version, generation: ready.generation, version_request_id: requestId } }
+  const corrected = applyExplanationEvent(completed, correction)
+  assert.equal(applyExplanationEvent(corrected, correction), corrected)
+  assert.equal(explanationUnits({ requestId, stream: corrected })[0].lifecycle, "corrected")
+  const deepen = "deepen"
+  const other = applyExplanationEvent(undefined, { type: "unit_draft", content: { ...draft, request_id: deepen } })
+  const replays = applyExplanationEvent(other, { type: "unit_ready", content: { ...ready, replayed: true } })
+  const combined = inquiryExplanationUnits(new Map([
+    [requestId, { requestId, stream: corrected }], [deepen, { requestId: deepen, stream: replays }],
+  ]))
+  assert.equal(combined.size, 1)
+  const [unit] = combined.values()
+  assert.equal(unit.current.request_id, deepen)
+  assert.equal(unit.lastReady.request_id, requestId)
+  assert.equal(unit.versions.length, 3)
+})
+
+test("v2 compatibility card labels Continue from the backend action and hides historical actions", () => {
+  const { card } = phase7Fixture()
+  const props = { onDiscuss: () => {}, onUnitAction: () => {} }
+  const html = render(ExplanationCard, { ...props, explanation: card })
+  assert.match(html, /Continuer : II\.2/)
+  assert.doesNotMatch(html, /Continuer avec la partie/)
+  assert.match(html, /À venir/)
+  assert.doesNotMatch(html, /Part II \(p\./)
+  const exercises = render(ExplanationCard, { ...props, explanation: phase7Fixture("exercises").card })
+  assert.match(exercises, /Hors demande/)
+  const historical = render(ExplanationCard, { ...props, explanation: { ...card, historical_source: true } })
+  assert.doesNotMatch(historical, /Continuer : II\.2/)
+  assert.deepEqual(supportedUnitActions({ ...card, learning_state: { ...card.learning_state,
+    next_actions: [{ action: "explain_unit", logical_id: "unit", request_id: "request" }] } }), [])
+})
+
+test("course shell uses Part II source labels and a complete eligible denominator", () => {
+  const { card, checking } = documentFixture("course")
+  const context = { checking: [checking], source: { title: "Post-hoc interpretation", pageCount: 11 } }
+  const model = explanationDocument(card, context)
+  assert.equal(model.shell, "course")
+  assert.deepEqual(model.counts, { total: 7, explained: 2, partial: 1, notGenerated: 4 })
+  assert.deepEqual(model.groups.map(({ label }) => label), ["II"])
+  assert.equal(model.checking, 1)
+  assert.equal(model.units.get(checking.output.logical_id).progress.status, "not_generated")
+  assert.equal(model.excluded.length, 3)
+  const html = render(ExplanationCard, { explanation: card, unitContext: context, onUnitAction: () => {} })
+  assert.match(html, /2 sur 7 unités expliquées/)
+  assert.match(html, /1 en vérification/)
+  assert.match(html, /Profondeur exhaustive/)
+  assert.match(html, /Hypothèse/)
+  assert.match(html, /Plan du cours/)
+  assert.match(html, /11 pages/)
+  inOrder(html, 'data-document-unit="course-1"', 'data-document-unit="course-2"', 'data-document-unit="course-3"',
+    'data-document-unit="course-4"', 'data-document-unit="course-5"')
+  assert.match(html, /Part I · Fundamentals/)
+  assert.match(html, /Part III · Interpretable models/)
+  assert.match(html, /Part IV · Auditability/)
+  assert.match(html, /Tout développer/)
+  assert.match(html, /Tout réduire/)
+  assert.match(html, /Approfondir II\.3/)
+  assert.match(html, /Continuer : II\.4/)
+  assert.doesNotMatch(html, /Legacy projection only|Duplicate fallback content|Expliquer maintenant/)
+  const reordered = { ...card, course_progress: { ...card.course_progress, learning_plan: {
+    ...card.course_progress.learning_plan, order: ["course-3", "course-2", "course-1"],
+  } } }
+  assert.deepEqual(explanationDocument(reordered).included.slice(0, 3).map(({ id }) => id), ["course-3", "course-2", "course-1"])
+})
+
+test("exercise shell keeps question groups, sheet exclusions and verified facts separate", () => {
+  const { card } = documentFixture("exercises")
+  const model = explanationDocument(card)
+  assert.deepEqual(model.groups.map(({ label, units }) => [label, units.length]), [["1", 3], ["2", 3]])
+  assert.equal(model.counts.total, 6)
+  assert.equal(model.excluded[0].progress.scope_reason, "exercise_excluded")
+  assert.deepEqual(model.results.map(({ label, value }) => [label, value]), [["1.b", "0,80"]])
+  const html = render(ExplanationCard, { explanation: card, onUnitAction: () => {} })
+  assert.match(html, /data-explanation-shell="exercises"/)
+  assert.match(html, /4 questions sur 6 répondues/)
+  assert.match(html, /Utilise 1.a/)
+  assert.match(html, /Résultats obtenus/)
+  assert.match(html, /0,80/)
+  assert.match(html, /Ignoré à votre demande/)
+  assert.match(html, /Continuer : 2.b/)
+  assert.match(html, /Compléter 2.a/)
+  assert.doesNotMatch(html, /Résoudre quand même|invalid sample value/)
+})
+
+test("lab roadmap uses supplied commands, checkpoints and deliverables as read-only requirements", () => {
+  const { card } = documentFixture("lab")
+  const html = render(ExplanationCard, { explanation: card, onUnitAction: () => {} })
+  assert.match(html, /data-explanation-shell="lab"/)
+  assert.match(html, /1 sur 4 étapes expliquées/)
+  assert.match(html, /Livrables demandés/)
+  assert.match(html, /Livrable demandé/)
+  assert.match(html, /Save the configured KNIME workflow/)
+  assert.match(html, /Point de contrôle/)
+  assert.match(html, /Source non vérifiable/)
+  assert.match(html, /Continuer : Étape 3/)
+  assert.doesNotMatch(html, /<input|Livrable terminé/)
+})
+
+test("missing classification and ledger omit invented totals while retaining genuine unit content", () => {
+  const { card, checking } = documentFixture("course")
+  const oldSource = { ...checking, generation: checking.generation + 1 }
+  const current = { ...card, course_progress: { ...card.course_progress, sections: [], learning_plan: undefined },
+    versions: [], coverage_ledger: { ...card.coverage_ledger, coverage_counts: { explained: 2 } } }
+  const model = explanationDocument(current, { checking: [oldSource] })
+  assert.equal(model.shell, "neutral")
+  assert.equal(model.counts, undefined)
+  assert.equal(model.checking, 0)
+  const html = render(ExplanationCard, { explanation: current })
+  assert.match(html, /data-explanation-shell="neutral"/)
+  assert.match(html, /Shapley value calculation/)
+  assert.doesNotMatch(html, /data-coverage-total|Tout développer/)
+})
+
+test("the full progress roster identifies a scoped chapter and a mixed practical lab", () => {
+  const { card } = documentFixture("course")
+  const progress = card.learning_state.progress.map((row) => ({ ...row,
+    kind: row.scope_reason === "non_teaching" ? "summary" : "concept",
+  }))
+  const scoped = { ...card, course_progress: { ...card.course_progress, sections: card.course_progress.sections.slice(0, 1) },
+    versions: card.versions.slice(0, 1), learning_state: { ...card.learning_state, progress } }
+  assert.equal(explanationDocument(scoped).shell, "course")
+
+  const { card: lab } = documentFixture("lab")
+  const extra = [
+    { ...lab.learning_state.progress[0], logical_id: "lecture-1", kind: "concept" },
+    { ...lab.learning_state.progress[0], logical_id: "lecture-2", kind: "concept" },
+    { ...lab.learning_state.progress[0], logical_id: "practice-1", kind: "exercise" },
+    { ...lab.learning_state.progress[0], logical_id: "practice-2", kind: "exercise" },
+  ]
+  const mixed = { ...lab, learning_state: { ...lab.learning_state, progress: [...lab.learning_state.progress, ...extra] } }
+  assert.equal(explanationDocument(mixed).shell, "lab")
+  extra[0].kind = undefined
+  assert.equal(explanationDocument(mixed).shell, "neutral")
+})
+
+test("a course can expand a previously generated exercise and rejects earlier source generations", () => {
+  const { card } = documentFixture("course")
+  const row = card.learning_state.progress.find((row) => row.logical_id === "course-5")
+  const identity = card.course_progress.sections.find((row) => row.id === "course-5")
+  const [base] = instructionalFixture("exercise").units
+  row.status = "explained"
+  const earlier = { ...card.versions[0], identity, request_id: "previous-turn",
+    output: { ...base, logical_id: row.logical_id, content_version: row.content_version, title: row.title } }
+  const model = explanationDocument(card, { previous: [earlier] })
+  assert.equal(model.shell, "course")
+  assert.ok(model.units.get(row.logical_id).output.blocks.some((block) => block.kind === "final_answer"))
+  const html = render(ExplanationCard, { explanation: card, unitContext: { previous: [earlier] } })
+  assert.match(html, /data-explanation-unit="exercise"/)
+  assert.equal(explanationDocument(card, { previous: [{ ...earlier, generation: earlier.generation - 1 }] })
+    .units.get(row.logical_id).output, undefined)
+})
 
 test("brief metadata preserves a compact table and source order, and keeps extras optional", () => {
   const html = render(ExplanationCard, { explanation: explanationFixtures.brief, onDiscuss: () => {} })

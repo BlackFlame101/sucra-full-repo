@@ -7,7 +7,8 @@ import { useParams, useRouter } from "next/navigation"
 import { ExerciseCard } from "@/components/chat/ExerciseCard"
 import { ExerciseFeedbackCard } from "@/components/chat/ExerciseFeedbackCard"
 import { ExplanationCard } from "@/components/chat/ExplanationCard"
-import type { PublicCorrection, PublicExercise, PublicExplanation, PublicSolution } from "@/lib/socra-ws"
+import { isEducationalDocument } from "@/lib/educational-document"
+import type { PublicCorrection, PublicExercise, ExplanationPayload, PublicSolution } from "@/lib/socra-ws"
 import { Button } from "@/components/ui/button"
 
 type SavedMessage = { id: string; role: string; content: string; metadata?: Record<string, unknown> }
@@ -34,7 +35,7 @@ type SavedLibraryItem = {
     message_id?: string
     session_id?: string
     snapshot?: { kind?: "inquiry" | "exam"; messages?: SavedMessage[]; exam?: SavedExam }
-    explanation?: PublicExplanation
+    explanation?: ExplanationPayload
     expected_answer?: string
     solution?: { expected_answer?: string; common_mistakes?: string[] }
     correction?: { overall_feedback?: string }
@@ -109,7 +110,7 @@ export default function SavedLibraryItemPage() {
           const exercise = metadata.exercise as PublicExercise | undefined
           const correction = metadata.correction as PublicCorrection | undefined
           const solution = metadata.solution as PublicSolution | undefined
-          const explanation = metadata.explanation as PublicExplanation | undefined
+          const explanation = metadata.explanation as ExplanationPayload | undefined
           return <div key={message.id} className="space-y-4">
             <article className={`rounded-2xl border p-4 sm:p-5 ${message.role === "user" ? "ml-6 border-secondary/25 bg-secondary/5 sm:ml-16" : "mr-6 border-border/60 bg-card/50 sm:mr-16"}`}>
               <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">{message.role === "user" ? "You" : "Socra"}</p>
@@ -146,7 +147,7 @@ export default function SavedLibraryItemPage() {
       {!snapshot && <section className="space-y-5 rounded-2xl border border-border/60 bg-card/40 p-5 sm:p-7">
         {item.content.explanation ? <>
           <Button disabled={savingNote} onClick={() => void addToNotebook()}>{savingNote ? "Creating note" : "Add to Notebook"}</Button>
-          {item.content.explanation.course_progress && (item.original_session_id || item.content.session_id) && <Button asChild variant="outline">
+          {!isEducationalDocument(item.content.explanation) && item.content.explanation.course_progress && (item.original_session_id || item.content.session_id) && <Button asChild variant="outline">
             <Link href={`/dashboard/course/${item.course_id}/inquiry/${item.original_session_id || item.content.session_id}`}>
               {item.content.explanation.language === "French" ? "Reprendre dans la conversation" : "Resume in conversation"}
             </Link>

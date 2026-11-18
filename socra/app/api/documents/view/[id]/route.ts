@@ -10,7 +10,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   if (!document || !document.storage_path.startsWith(`${user.id}/${document.course_id}/`)) {
     return new Response("PDF not found.", { status: 404 })
   }
-  const page = Number(new URL(request.url).searchParams.get("page") ?? 1)
+  const query = new URL(request.url).searchParams
+  const requestedSource = query.get("source")
+  if (requestedSource && requestedSource !== document.content_hash) {
+    return new Response("This citation refers to an earlier PDF revision.", { status: 409 })
+  }
+  const page = Number(query.get("page") ?? 1)
   if (!Number.isSafeInteger(page) || page < 1 || (document.page_count && page > document.page_count)) {
     return new Response("This page is not available in the PDF.", { status: 404 })
   }

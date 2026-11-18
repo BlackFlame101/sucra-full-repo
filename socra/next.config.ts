@@ -13,4 +13,9 @@ const nextConfig: NextConfig = {
   },
 };
 
+if (process.env.SOCRA_MANUAL_TEST === "1") {
+  nextConfig.distDir = ".next-socra-test";
+  nextConfig.typescript = { tsconfigPath: "tsconfig.socra-test.json" };
+}
+
 export default nextConfig;

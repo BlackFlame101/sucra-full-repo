@@ -1,7 +1,7 @@
 import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { notebookId } from "@/lib/notebook/schema"
 
-export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function GET(_request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const client = await createClient()
   const { data: { user } } = await client.auth.getUser()
@@ -19,7 +19,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     client.from("messages").select("id").eq("id", source.message_id).eq("session_id", source.session_id).maybeSingle(),
   ])
   if (!note.data || !session.data || !message.data) return unavailable()
-  const url = new URL(`/dashboard/course/${source.course_id}/inquiry/${source.session_id}`, request.url)
-  url.searchParams.set("message", source.message_id)
-  return new Response(null, { status: 302, headers: { Location: url.href, "Cache-Control": "private, no-store" } })
+  const path = `/dashboard/course/${encodeURIComponent(source.course_id)}/inquiry/${encodeURIComponent(source.session_id)}`
+  const query = new URLSearchParams({ message: source.message_id })
+  return new Response(null, { status: 302, headers: { Location: `${path}?${query}`, "Cache-Control": "private, no-store" } })
 }

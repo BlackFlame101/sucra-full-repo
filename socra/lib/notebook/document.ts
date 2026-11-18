@@ -1,5 +1,6 @@
 import { Marked, type Token, type Tokens } from "marked"
 import type { JSONContent } from "@tiptap/react"
+import type { EducationalDocument } from "@/lib/educational-document"
 
 export type NoteDocument = JSONContent & { type: "doc"; content: JSONContent[] }
 export const emptyNote: NoteDocument = { type: "doc", content: [{ type: "paragraph" }] }
@@ -11,6 +12,13 @@ export function safeNoteLink(href: string) {
 type MathToken = Tokens.Generic & { latex: string }
 const markdown = new Marked({
   extensions: [{
+    name: "sourceCitation", level: "inline",
+    start: (src) => { const at = src.indexOf("[["); return at < 0 ? undefined : at },
+    tokenizer(src) {
+      const match = /^\[\[([a-f0-9]{24})\]\]/.exec(src)
+      if (match) return { type: "sourceCitation", raw: match[0], citationId: match[1] }
+    },
+  }, {
     name: "blockMath", level: "block",
     tokenizer(src) {
       const match = /^(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]) *(?:\n|$)/.exec(src)
@@ -29,34 +37,49 @@ const markdown = new Marked({
 const textNode = (text: string, marks: JSONContent["marks"] = []): JSONContent[] =>
   text ? [{ type: "text", text, ...(marks.length ? { marks } : {}) }] : []
 
-function inline(tokens: Token[], marks: NonNullable<JSONContent["marks"]> = []): JSONContent[] {
+type NoteImport = { citations: ReadonlyMap<string, JSONContent>; headings: ReadonlyMap<Token, string> }
+
+function inline(tokens: Token[], marks: NonNullable<JSONContent["marks"]> = [], input?: NoteImport): JSONContent[] {
   return tokens.flatMap((token) => {
     const t = token as Tokens.Generic
     switch (t.type) {
+      case "sourceCitation": return input?.citations.has(t.citationId) ? [input.citations.get(t.citationId)!] : textNode(t.raw, marks)
       case "inlineMath": return [{ type: t.type, attrs: { latex: (t as MathToken).latex } }]
       case "strong": case "em": case "del":
-        return inline(t.tokens ?? [], [...marks, { type: { strong: "bold", em: "italic", del: "strike" }[t.type] }])
+        return inline(t.tokens ?? [], [...marks, { type: { strong: "bold", em: "italic", del: "strike" }[t.type] }], input)
       case "codespan": return textNode(t.text, [{ type: "code" }])
-      case "link": return inline(t.tokens ?? [], safeNoteLink(t.href) ? [...marks, { type: "link", attrs: { href: t.href } }] : marks)
+      case "link": return inline(t.tokens ?? [], safeNoteLink(t.href) ? [...marks, { type: "link", attrs: { href: t.href } }] : marks, input)
       case "br": return [{ type: "hardBreak" }]
-      case "text": return t.tokens?.length ? inline(t.tokens, marks) : textNode(t.text, marks)
+      case "text": return t.tokens?.length ? inline(t.tokens, marks, input) : textNode(t.text, marks)
       case "escape": case "image": return textNode(t.text, marks)
       default: return textNode(t.raw, marks)
     }
   })
 }
 
-function blocks(tokens: Token[]): JSONContent[] {
+function blocks(tokens: Token[], input?: NoteImport): JSONContent[] {
   return tokens.flatMap((token) => {
     const t = token as Tokens.Generic
     switch (t.type) {
       case "space": return []
-      case "heading": return [{ type: "heading", attrs: { level: Math.min(t.depth, 3) }, content: inline(t.tokens ?? []) }]
-      case "code": return [{ type: "codeBlock", attrs: { language: t.lang?.split(/\s/)[0] || null }, content: textNode(t.text) }]
+      case "heading": return [{ type: "heading", attrs: { level: Math.min(t.depth, input ? 6 : 3),
+        ...(input?.headings.has(token) ? { sectionId: input.headings.get(token) } : {}) }, content: inline(t.tokens ?? [], [], input) }]
+      case "code": {
+        const [language, identity] = (t.lang ?? "").split(/\s+/, 2)
+        const cellId = input && /^cell:[a-f0-9]{24}$/.test(identity ?? "") ? identity.slice(5) : null
+        return [{ type: "codeBlock", attrs: { language: language || null, ...(cellId ? { cellId } : {}) }, content: textNode(t.text) }]
+      }
       case "hr": return [{ type: "horizontalRule" }]
       case "blockMath": return [{ type: t.type, attrs: { latex: (t as MathToken).latex } }]
-      case "blockquote": return [{ type: "blockquote", content: blocks(t.tokens ?? []) }]
+      case "blockquote": return [{ type: "blockquote", content: blocks(t.tokens ?? [], input) }]
       case "table": {
+        if (input) {
+          const table = token as Tokens.Table
+          return [{ type: "table", content: [table.header, ...table.rows].map((row, index) => ({
+            type: "tableRow", content: row.map((cell) => ({ type: index === 0 ? "tableHeader" : "tableCell",
+              content: [{ type: "paragraph", content: inline(cell.tokens, [], input) }] })),
+          })) }]
+        }
         // Notebook has no editable table node. Keep the Markdown rows copyable
         // using the editor's existing hard breaks instead of collapsed whitespace.
         const rows = t.raw.replace(/\n+$/, "").split("\n")
@@ -70,13 +93,13 @@ function blocks(tokens: Token[]): JSONContent[] {
         return [{ type: tasks ? "taskList" : t.ordered ? "orderedList" : "bulletList",
           ...(t.ordered && !tasks ? { attrs: { start: t.start } } : {}),
           content: items.map((item) => {
-            const children = blocks(item.tokens)
+            const children = blocks(item.tokens, input)
             if (children[0]?.type !== "paragraph") children.unshift({ type: "paragraph" })
             return { type: tasks ? "taskItem" : "listItem", ...(tasks ? { attrs: { checked: item.checked } } : {}), content: children }
           }) }]
       }
       case "paragraph": case "text":
-        return [{ type: "paragraph", content: t.tokens?.length ? inline(t.tokens) : textNode(t.text) }]
+        return [{ type: "paragraph", content: t.tokens?.length ? inline(t.tokens, [], input) : textNode(t.text) }]
       default: return [{ type: "paragraph", content: textNode(t.raw) }]
     }
   })
@@ -91,6 +114,28 @@ export function markdownNote(value: string): NoteDocument {
   return content.length ? { type: "doc", content } : emptyNote
 }
 
+export function educationalNote(doc: EducationalDocument): NoteDocument {
+  const citations = new Map(doc.citations.map((ref) => [ref.citation_id, { type: "sourceCitation", attrs: {
+    citationId: ref.citation_id, documentId: doc.source.document_id, sourceHash: doc.source.source_hash,
+    page: ref.span.page, start: ref.span.start, end: ref.span.end, checksum: ref.checksum,
+  } }]))
+  const markup = doc.document_markdown
+  const tokens = lexStudyMarkdown(markup)
+  const positions = new Map(doc.sections.map((section) => [section.markdown_start, section.section_id]))
+  const headings = new Map<Token, string>()
+  let cursor = 0
+  for (const token of tokens) {
+    const start = markup.indexOf(token.raw, cursor)
+    if (start < 0) continue
+    cursor = start + token.raw.length
+    if (token.type === "heading") {
+      const id = positions.get(Array.from(markup.slice(0, start)).length)
+      if (id) headings.set(token, id)
+    }
+  }
+  return { type: "doc", content: blocks(tokens, { citations, headings }) }
+}
+
 export function suggestionNote(value: string): NoteDocument {
   const wrapped = /^(`{3,}|~{3,})(?:markdown|md)[ \t]*\r?\n([\s\S]*?)\r?\n\1[ \t]*$/i.exec(value.trim())
   return markdownNote(wrapped?.[2] ?? value)
@@ -98,6 +143,7 @@ export function suggestionNote(value: string): NoteDocument {
 
 export function noteText(node: JSONContent): string {
   if (node.type === "sourceBlock") return ""
+  if (node.type === "sourceCitation") return "p. " + node.attrs?.page
   if (node.type === "hardBreak") return "\n"
   if (node.type === "inlineMath" || node.type === "blockMath") return node.attrs?.latex ?? ""
   if (node.text) return node.text

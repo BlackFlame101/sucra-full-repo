@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\"reviews\":[{\"unit_id\":\"7c8d7c9c6d747737a13d2d67\",\"pedagogy_score\":3,\"findings\":[],\"ledger_updates\":[]}]}",
+            "thoughtSignature": "EokBCoYBAWkUfROaM5nBjubQFQi/tG7nBYTA62zk0Oc8Qmm7aAOxkNCHI/sDYoRes5CHEW7oK2XoiX2UFztK4fHUtNL2a3COs2KsdEqXymSJFwp6ummB0N9U0qJX4ZWvEUXHoFRlKcs57Pb0QfYuW8g/qcOFxv3+PfUYem7iOpP01zpNYG2c1vu2HXc="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6444,
+    "candidatesTokenCount": 49,
+    "totalTokenCount": 6493,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 6444
+      }
+    ],
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash-lite",
+  "responseId": "QV_9aqu4AeOvvdIPoZDx-Qw"
+}

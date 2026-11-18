@@ -18,9 +18,12 @@ from agents.llm import is_transient_provider_error, provider_error_code, provide
 from agents.notebook import NOTE_ACTIONS, load_notebook_context
 
 from api.security import RateLimit, consume_study_quota
+from agents.explain_lifecycle import correction_event
+from agents.explain_document import educational_documents_enabled
 from config import get_settings
 from db import messages as messages_db
 from db.chat_turns import session_turn
+from db.explain_progress import KEY as UNIT_CHECKPOINT_KEY, CheckpointRejected, TurnCheckpoint, source_is_current
 from db.exams import get_exam_for_session
 from db.attempts import (
     get_exercise_for_owner,
@@ -34,8 +37,11 @@ from graph.orchestrator import get_compiled_graph
 from graph.state import ChatTurn, SocraState
 from models.schemas import ExerciseActionRequest, ExerciseAttemptRequest
 from rag.retriever import request_id as retrieval_request_id, retrieval_scope
+from rag.unit_map import unit_pipeline_enabled
 
 
+_UNIT_ACTIONS = {"continue_learning", "deepen_unit"}
+_UNIT_PROTOCOL_ACTIONS = _UNIT_ACTIONS | {"restore_unit_progress"}
 router = APIRouter(tags=["chat"])
 logger = logging.getLogger(__name__)
 chat_limit = RateLimit(20)
@@ -184,12 +190,18 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
     except WebSocketDisconnect:
         return
     except Exception:
-        await _send(ws, {"type": "error", "content": {"code": "AUTH_REQUIRED", "message": "Sign in again to open this inquiry."}})
-        await ws.close(code=1008)
+        try:
+            await _send(ws, {"type": "error", "content": {"code": "AUTH_REQUIRED", "message": "Sign in again to open this inquiry."}})
+            await ws.close(code=1008)
+        except (WebSocketDisconnect, OSError, RuntimeError):
+            return
         return
 
     graph = get_compiled_graph()
-    await _send(ws, {"type": "connected", "session_id": session_id, "connection_id": connection_id, "version": protocol})
+    try:
+        await _send(ws, {"type": "connected", "session_id": session_id, "connection_id": connection_id, "version": protocol})
+    except (WebSocketDisconnect, OSError, RuntimeError):
+        return
     logger.info("chat_connected connection_id=%s duration_ms=%d", connection_id, (monotonic() - connected_at) * 1000)
     incoming: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=3)
     cancelled = asyncio.Event()
@@ -233,13 +245,52 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         payload: dict[str, Any], action: str, requested_mode: str, student_message: str,
         display_message: str, attempt_request: ExerciseAttemptRequest | None,
         emit: Callable[..., Awaitable[None]], card: Callable[[str, Any], Awaitable[None]],
-        progress: Callable[[str], Awaitable[None]], timing: Callable[..., None], turn_started: float,
+        progress: Callable[[str], Awaitable[None]], timing: Callable[..., None], turn_started: float, lease: str,
     ) -> None:
         nonlocal response_finished
         course_id, user_id = course_id_resolved, user_id_resolved
         first_text_sent = False
         node_started: dict[str, float] = {}
         model_started: dict[str, float] = {}
+        if action == "restore_unit_progress":
+            try:
+                reference = str(UUID(str(payload.get("fromRequestId"))))
+                snapshot = await asyncio.to_thread(messages_db.load_study_turn, session_id, user_id, reference)
+                if not snapshot or snapshot.get("is_exam"):
+                    raise ValueError
+                messages = {row["role"]: row for row in snapshot["request_messages"]}
+                saved_card = (messages.get("assistant", {}).get("metadata") or {}).get("explanation") or {}
+                checkpoint = (messages.get("user", {}).get("metadata") or {}).get(UNIT_CHECKPOINT_KEY)
+                if checkpoint and any(row.get("kind") == "educational_document" for row in checkpoint["versions"]):
+                    raise ValueError
+                if not checkpoint and saved_card.get("schema_version") == 2:
+                    saved_progress = saved_card["course_progress"]
+                    checkpoint = {**saved_progress, "generation": saved_progress["index_generation"],
+                                  "versions": saved_card["versions"]}
+                if not checkpoint:
+                    raise ValueError
+                if not await asyncio.to_thread(source_is_current, checkpoint, course_id, user_id):
+                    raise ValueError
+            except (ValueError, KeyError):
+                await emit("error", "There is no current unit progress for this request.")
+                return
+            versions = checkpoint["versions"]
+            latest = {row["output"]["logical_id"]: row for row in versions}
+            if protocol == 2:
+                for row in latest.values():
+                    await emit("unit_ready" if row["stage"] == "ready" else "unit_draft",
+                               {key: value for key, value in row.items() if key != "deterministic_facts"}
+                               | {"replayed": True})
+                for row in versions:
+                    if row["stage"] != "ready":
+                        continue
+                    for change in row["change_log"]:
+                        await emit("unit_correction", correction_event(row, change))
+            if saved_card:
+                await card("explanation", saved_card)
+            await emit("turn_finalized")
+            await emit("done")
+            return
         if action in ("restore_exercise", "reveal_solution", "submit_attempt") and await asyncio.to_thread(
             get_exam_for_session, session_id=session_id, user_id=user_id,
         ):
@@ -388,26 +439,48 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 return
         fingerprint_fields = [action, requested_mode, exercise_id, student_message, attempt_request.hints_used if attempt_request else 0]
         prior_course = None
-        if payload.get("continueCourseFrom") is not None:
+        unit_action = None
+        target_unit = None
+        if payload.get("continueCourseFrom") is not None or action in _UNIT_ACTIONS:
             from agents.explain_tasks import explain_flag
 
             try:
-                if requested_mode != "explain" or action != "message" or not explain_flag("EXPLAIN_INTENT_PLANS"):
+                if requested_mode != "explain" or action not in _UNIT_ACTIONS | {"message"} or not explain_flag("EXPLAIN_INTENT_PLANS"):
                     raise ValueError
-                prior_request = str(UUID(str(payload["continueCourseFrom"])))
+                prior_request = str(UUID(str(payload.get("fromRequestId") if action in _UNIT_ACTIONS else payload["continueCourseFrom"])))
                 previous = await asyncio.to_thread(messages_db.load_study_turn, session_id, user_id, prior_request)
-                prior_course = next(
-                    ((row.get("metadata") or {}).get("explanation") or {}).get("course_progress")
+                prior_card = next(
+                    (row.get("metadata") or {}).get("explanation") or {}
                     for row in (previous or {}).get("request_messages", []) if row["role"] == "assistant"
                 )
-                if not prior_course or prior_course.get("next_request_id") != current_request:
+                prior_course = prior_card.get("course_progress")
+                if not prior_course:
+                    raise ValueError
+                if unit_pipeline_enabled() and prior_card.get("schema_version") == 2 and "learning_state" in prior_card:
+                    unit_action = action if action in _UNIT_ACTIONS else "continue_learning"
+                    command = next(item for item in prior_card["learning_state"]["next_actions"]
+                                   if item["action"] == unit_action and item["request_id"] == current_request)
+                    target_unit = command["logical_id"]
+                    if unit_action == "deepen_unit":
+                        if target_unit != payload.get("unitId"):
+                            raise ValueError
+                elif action != "message" or prior_course.get("next_request_id") != current_request:
                     raise ValueError
             except (ValueError, StopIteration):
                 await emit("error", "Open the saved course part in this inquiry to continue.")
                 return
             fingerprint_fields = ["continue_course", prior_request]
+            if unit_action:
+                fingerprint_fields = [unit_action, target_unit, prior_course["document_id"],
+                                      prior_course["source_hash"], prior_course["index_generation"]]
         if note_id:
             fingerprint_fields.extend([note_id, note_action, selection])
+        if unit_action and payload.get("documentId") is not None and (
+                str(payload["documentId"]).lower() != prior_course["document_id"]):
+            await emit("error", "The selected PDF differs from the saved explanation.")
+            return
+        if unit_pipeline_enabled() and not unit_action and requested_mode == "explain" and payload.get("documentId") is not None:
+            fingerprint_fields.append(str(payload["documentId"]).lower())
         fingerprint = sha256(json.dumps(
             fingerprint_fields,
             ensure_ascii=False,
@@ -420,6 +493,26 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         existing_response = by_role.get("assistant")
         if existing_response:
             metadata = existing_response.get("metadata") or {}
+            stored_document = metadata.get("explanation") or {}
+            if stored_document.get("schema_version") == 3:
+                source = stored_document["source"]
+                if not await asyncio.to_thread(source_is_current, {
+                    **source, "generation": source["index_generation"],
+                }, course_id, user_id):
+                    metadata = metadata | {"explanation": stored_document | {"historical_source": True}}
+            if protocol == 2 and unit_pipeline_enabled():
+                saved_card = metadata.get("explanation") or {}
+                saved_progress = saved_card.get("course_progress") or {}
+                if saved_card.get("versions") and "index_generation" in saved_progress:
+                    source = {**saved_progress, "generation": saved_progress["index_generation"]}
+                    if not await asyncio.to_thread(source_is_current, source, course_id, user_id):
+                        metadata = metadata | {"explanation": saved_card | {"historical_source": True}}
+                        saved_card = {}
+                for row in saved_card.get("versions", []):
+                    if row["stage"] == "ready":
+                        await emit("unit_ready", row | {"replayed": True})
+                        for change in row["change_log"]:
+                            await emit("unit_correction", correction_event(row, change))
             for card_kind in ("exercise", "explanation", "correction"):
                 if metadata.get(card_kind):
                     await card(card_kind, metadata[card_kind])
@@ -495,7 +588,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 logger.warning("chat_title_save_failed request_id=%s", current_request)
 
         try:
-            await asyncio.to_thread(messages_db.save_message, session_id, "user", display_message,
+            prompt_row = await asyncio.to_thread(messages_db.save_message, session_id, "user", display_message,
                                    metadata={"learning_mode": requested_mode, "request_id": current_request,
                                          **({"notebook_action": note_action} if context else {}),
                                          "request_fingerprint": fingerprint})
@@ -527,6 +620,17 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         initial_state["request_id"] = current_request
         if prior_course:
             initial_state["explain_course_prior"] = prior_course
+        document_run = educational_documents_enabled() and not prior_course and not unit_action
+        if (unit_pipeline_enabled() or document_run) and requested_mode == "explain" and not context:
+            initial_state["explain_checkpoint"] = TurnCheckpoint(
+                session_id, course_id, user_id, current_request, prior_prompt or prompt_row, lease=lease,
+            )
+            if protocol == 2:
+                initial_state["explain_document_event" if document_run else "explain_unit_event"] = emit
+            if unit_action:
+                initial_state["explain_unit_action"] = unit_action
+                if target_unit:
+                    initial_state["explain_target_unit"] = target_unit
         initial_state["explain_language_explicit"] = payload.get("language") in ("fr", "en")
         if requested_mode == "explain" and payload.get("documentId") is not None:
             try:
@@ -631,6 +735,10 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             timing("cancelled", turn_started)
             await emit("cancelled")
             return
+        except CheckpointRejected:
+            await emit("error", {"code": "EXPLAIN_CHECKPOINT_REJECTED",
+                                 "message": "Unit progress changed. Reopen the inquiry before retrying."})
+            return
         except Exception as exc:
             timing("failed", turn_started, error_type=type(exc).__name__)
             if response_finished:
@@ -667,6 +775,12 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             elif explanation:
                 metadata["explanation"] = explanation
                 text = "Course explanation ready."
+                if explanation.get("schema_version") == 3:
+                    french_document = explanation["intent"]["language"] == "French"
+                    if explanation["state"] == "approved":
+                        text = "Document pédagogique prêt." if french_document else "Educational document ready."
+                    else:
+                        text = "Document pédagogique incomplet." if french_document else "Educational document incomplete."
             elif correction:
                 metadata.update(correction=correction, exercise_id=exercise_id)
                 text = f"You scored {correction['total_score']} out of {correction['max_score']}. Review your feedback below."
@@ -676,7 +790,15 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 await emit("error", "The tutor returned an empty response. Try again.")
                 return
             try:
-                saved = await asyncio.to_thread(messages_db.save_message, session_id, "assistant", text, metadata=metadata)
+                checkpoint = initial_state.get("explain_checkpoint")
+                if checkpoint and checkpoint.document and explanation and explanation.get("schema_version") in {2, 3}:
+                    saved = await checkpoint.finalize(text, metadata)
+                else:
+                    saved = await asyncio.to_thread(messages_db.save_message, session_id, "assistant", text, metadata=metadata)
+            except CheckpointRejected:
+                await emit("error", {"code": "EXPLAIN_CHECKPOINT_REJECTED",
+                                     "message": "Explanation progress changed. Reopen the inquiry before retrying."})
+                return
             except Exception as exc:
                 logger.warning("chat_response_save_failed request_id=%s error_type=%s", current_request, type(exc).__name__)
                 await emit("error", "Could not save this response. Try again.")
@@ -772,13 +894,16 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 continue
 
             action = str(payload.get("action") or "message").strip().lower()
-            if action not in ("message", "submit_attempt", "reveal_solution", "restore_exercise"):
+            if action not in ("message", "submit_attempt", "reveal_solution", "restore_exercise") and not (
+                unit_pipeline_enabled() and action in _UNIT_PROTOCOL_ACTIONS
+            ):
                 await emit("error", "Unsupported chat action")
                 continue
             student_message = (
                 str(payload.get("answer") or "").strip()
                 if action == "submit_attempt"
-                else str(payload.get("message") or "").strip()
+                else str(payload.get("message") or
+                         {"continue_learning": "Continue learning", "deepen_unit": "Deepen this unit"}.get(action, "")).strip()
             )
             display_message = _display_message(payload.get("displayText"), student_message)
             attempt_request = None
@@ -801,7 +926,10 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             if requested_mode not in ("socratic", "exercise", "explain"):
                 await emit("error", "Unsupported learning mode")
                 continue
-            if action != "message" and requested_mode != "exercise":
+            if action in _UNIT_PROTOCOL_ACTIONS and requested_mode != "explain":
+                await emit("error", "Unit actions require Explain mode")
+                continue
+            if action not in _UNIT_PROTOCOL_ACTIONS | {"message"} and requested_mode != "exercise":
                 await emit("error", "Exercise actions require Short Answer Practice mode")
                 continue
             if not chat_limit.allow(user_id):
@@ -828,8 +956,8 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             if disconnected.is_set():
                 return
             await progress("Waiting for the inquiry to be available.")
-            async with session_turn(session_id, user_id) as acquired:
-                if not acquired:
+            async with session_turn(session_id, user_id) as lease:
+                if not lease:
                     await emit("error", "This inquiry is busy in another tab. Try again shortly.")
                     continue
                 if cancelled.is_set():
@@ -840,7 +968,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 try:
                     async with retrieval_scope():
                         await process_action(payload, action, requested_mode, student_message, display_message,
-                                             attempt_request, emit, card, progress, timing, turn_started)
+                                             attempt_request, emit, card, progress, timing, turn_started, lease)
                 finally:
                     timing("progress_stage", stage_started, label=previous_stage.replace(" ", "_"))
                     retrieval_request_id.reset(context_token)

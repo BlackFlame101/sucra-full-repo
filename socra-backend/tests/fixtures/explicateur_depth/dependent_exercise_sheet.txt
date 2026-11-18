@@ -1,0 +1,12 @@
+Fiche d'exercices — une relation affine
+
+Exercice 1 : On définit y(x) = ax + 1 et on mesure y(2) = 7.
+(a) Déterminez a.
+(b) Calculez y(5) en utilisant le résultat de (a).
+(c) Pour quelle valeur de x a-t-on y(x) = 10 ? Vérifiez la réponse.
+
+Exercice 2 : Une quantité augmente ensuite de 25 %.
+(a) Utilisez y(5), calculé à l'exercice 1(b), comme quantité initiale et calculez l'augmentation.
+(b) Déduisez la quantité finale de (a) et donnez un calcul indépendant pour la vérifier.
+
+Exercice 3 : Pour z(x) = 2x − 4, calculez z(9).

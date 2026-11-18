@@ -1,13 +1,14 @@
 "use client"
 
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react"
-import { MoreHorizontal, Star, Trash2, X } from "lucide-react"
+import { MoreHorizontal, Printer, Star, Trash2, X } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { NoteEditor, type EditorHandle, type SelectionRequest, type Spelling } from "./NoteEditor"
 import { notebookDraftKey, useNotebookAutosave } from "@/hooks/useNotebookAutosave"
 import { readNoteDocument } from "@/lib/notebook/document"
+import { isEducationalDocument } from "@/lib/educational-document"
 import type { Note, NoteCourse, NoteDraft } from "@/lib/notebook/notes"
 
 export type NoteWorkspaceHandle = EditorHandle & { leave: () => Promise<boolean>; save: () => Promise<boolean> }
@@ -37,6 +38,17 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
   const restored = useRef(false)
   const editorHandle = useRef<EditorHandle>(null)
   const { change, flush, preserve, restore, resolve, state } = useNotebookAutosave(note, initial, onSaved)
+  const source = note.source_data as { explanation?: unknown; initial_note_version?: number } | null
+  const educational = isEducationalDocument(source?.explanation) ? source.explanation : null
+  const french = educational?.intent.language === "French"
+
+  async function openPrint() {
+    const preview = window.open("about:blank", "_blank")
+    if (!preview) return
+    preview.opener = null
+    if (await flush()) preview.location.replace("/api/notebook/" + encodeURIComponent(note.id) + "/print")
+    else preview.close()
+  }
 
   useImperativeHandle(handle, () => ({
     leave: async () => await flush() || preserve(),
@@ -98,15 +110,22 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
   }}>
     <div className="mx-auto w-full max-w-[50rem] space-y-2 px-5 py-3 sm:px-8">
       <div className="flex items-center gap-1">
-        <Input aria-label="Note title" value={details.title} placeholder="Untitled note" maxLength={240} disabled={!initialized}
+        {!educational && <Input aria-label="Note title" value={details.title} placeholder="Untitled note" maxLength={240} disabled={!initialized}
           onChange={(event) => update({ title: event.target.value })}
-          className="h-auto min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 py-1 font-serif text-2xl! shadow-none focus-visible:ring-0 dark:bg-transparent sm:text-3xl!" />
+          className="h-auto min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 py-1 font-serif text-2xl! shadow-none focus-visible:ring-0 dark:bg-transparent sm:text-3xl!" />}
+        {educational && <details className="min-w-0 flex-1 text-sm text-muted-foreground">
+          <summary className="cursor-pointer">{french ? "Paramètres de la note" : "Note settings"}</summary>
+          <Input aria-label="Note title" value={details.title} maxLength={240} disabled={!initialized}
+            onChange={(event) => update({ title: event.target.value })} className="mt-2" />
+        </details>}
         <DropdownMenu>
           <DropdownMenuTrigger asChild><Button variant="ghost" size="icon-sm" aria-label="Note actions"><MoreHorizontal /></Button></DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={onAsk}>Ask Socra</DropdownMenuItem>
             <DropdownMenuItem disabled={!initialized} onSelect={() => update({ starred: !details.starred })}><Star />{details.starred ? "Unstar note" : "Star note"}</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void flush()}>Save now</DropdownMenuItem>
+            {educational && <DropdownMenuItem onSelect={() => void openPrint()}><Printer />
+              {french ? "Exporter en PDF" : "Export PDF"}</DropdownMenuItem>}
             {(["auto", "en", "fr", "off"] as const).map((option) =>
               <DropdownMenuItem key={option} role="menuitemradio" aria-checked={spelling === option} onSelect={() => {
                 setSpelling(option)
@@ -123,6 +142,10 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
             {courses.map((course) => <option key={course.id} value={course.id}>{course.name}</option>)}
           </select>
         <p role="status" className={state.label === "Error" ? "text-destructive" : "text-muted-foreground"}><span aria-hidden className="mr-1 inline-block size-1.5 rounded-full bg-current" />{state.label}</p>
+        {educational && <span className="text-muted-foreground">
+          {note.version === source?.initial_note_version ? (french ? "Document généré" : "Generated document")
+            : (french ? "Révision modifiée " : "Edited revision ") + note.version}
+        </span>}
         {details.tags.map((item) => <button type="button" key={item} onClick={() => update({ tags: details.tags.filter((tag) => tag !== item) })}
           className="inline-flex items-center gap-1 rounded-full bg-secondary/15 px-2 py-1 text-xs text-foreground"
           aria-label={`Remove tag ${item}`}>#{item}<X className="size-3" /></button>)}

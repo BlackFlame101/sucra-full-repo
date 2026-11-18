@@ -16,7 +16,10 @@ function load(path, dependencies = {}) {
 }
 
 const document = load("lib/notebook/document.ts")
-const schema = load("lib/notebook/schema.ts", { "./document": document })
+const pdfPage = load("lib/documents/pdf-page.ts")
+const educational = load("lib/educational-document.ts", { "@/lib/documents/pdf-page": pdfPage })
+const schema = load("lib/notebook/schema.ts", { "./document": document,
+  "@/lib/documents/pdf-page": pdfPage, "@/lib/educational-document": educational })
 const id = "00000000-0000-0000-0000-000000000001"
 const course = "00000000-0000-0000-0000-000000000002"
 const session = "00000000-0000-0000-0000-000000000003"
@@ -183,6 +186,7 @@ test("capture uses persisted messages and preserves formatting in a selected exc
       ? { content: "The **verified phrase** is useful.", metadata: explanation ? { explanation } : correction ? { correction, exercise_id: id } : {} } : null)
   } }
   const { POST } = load("app/api/notebook/capture/route.ts", {
+    "@/lib/educational-document": educational,
     "next/server": { NextResponse: Response },
     "@/lib/ai/explanation-note": load("lib/ai/explanation-note.ts", {
       "@/lib/ai/explanation-presentation": load("lib/ai/explanation-presentation.ts", {
@@ -204,7 +208,11 @@ test("capture uses persisted messages and preserves formatting in a selected exc
         answerReads++
         return query(() => ({ expected_answer: "The private solution", common_mistakes: [] }))
       },
-      rpc: async (name, args) => { assert.equal(name, "capture_notebook_response"); saved = args; return { data: { state: "saved", id } } },
+      rpc: async (name, args) => {
+        assert.equal(name, educational.isEducationalDocument(explanation) ? "capture_educational_document" : "capture_notebook_response")
+        saved = { ...args, rpcName: name }
+        return { data: { state: "saved", id } }
+      },
     }) },
   })
   const save = (selection) => POST(new Request("https://socra.test/capture", { method: "POST",
@@ -241,4 +249,17 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   assert.match(note, /[?]page=4#page=4/)
   assert.match(note, /Ask to continue with step 3/)
   assert.doesNotMatch(note, /Out of bounds|Other course|[?]page=5/)
+  const citation = "a".repeat(24)
+  const fullText = "Provenance conservée. ".repeat(190)
+  explanation = { schema_version: 3, format: "educational_document", document_id: "b".repeat(24),
+    revision_id: "c".repeat(24), title: "Exemple complet", intent: { language: "French" },
+    source: { document_id: id, filename: "Course.pdf", source_hash: "d".repeat(64), index_generation: 1 },
+    sections: [], code_cells: [], prerequisites: [], remaining: [],
+    citations: [{ citation_id: citation, span: { page: 4, start: 4, end: 22 }, quote: "Excerpt", checksum: "e".repeat(64) }],
+    document_markdown: "# Exemple complet\n\n" + fullText + "[[" + citation + "]]\n\nLa dernière section reste présente." }
+  assert.equal((await save(null)).status, 200)
+  assert.equal(saved.rpcName, "capture_educational_document")
+  assert.ok(saved.body_text.length > 3_000)
+  assert.match(saved.body_text, /La dernière section reste présente/)
+  assert.ok(saved.body_nodes.some((node) => node.content?.some((part) => part.type === "sourceCitation")))
 })

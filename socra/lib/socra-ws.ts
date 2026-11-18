@@ -6,6 +6,9 @@
  * Protocol mirrors `socra-backend/api/websocket.py`.
  */
 
+import { isExplanationEventType, validExplanationEvent, type ExplanationEvent } from "./explanation-v2"
+import { isEducationalDocument, type EducationalDocument } from "./educational-document"
+
 // ---------------------------------------------------------------------------
 // Server → client message shapes
 // ---------------------------------------------------------------------------
@@ -52,6 +55,8 @@ export interface PublicExplanation {
   citations: ExerciseCitation[]
   check_question: string
 }
+
+export type ExplanationPayload = PublicExplanation | EducationalDocument
 
 export interface CourseProgress {
   part: number
@@ -127,9 +132,11 @@ export type PublicCard =
   | { kind: "exercise"; card: PublicExercise }
   | { kind: "correction"; card: PublicCorrection }
   | { kind: "solution"; card: PublicSolution }
-  | { kind: "explanation"; card: PublicExplanation }
+  | { kind: "explanation"; card: ExplanationPayload }
 
 export type WSServerMessage =
+  | ExplanationEvent
+  | { type: "document_snapshot"; content: EducationalDocument }
   | { type: "diagnostic"; content: DiagnosticReport }
   | { type: "token"; content: string }
   | { type: "content_delta"; content: { text: string | null; preview?: boolean } }
@@ -141,7 +148,7 @@ export type WSServerMessage =
   | { type: "exercise"; content: PublicExercise }
   | { type: "correction"; content: PublicCorrection }
   | { type: "solution"; content: PublicSolution }
-  | { type: "explanation"; content: PublicExplanation }
+  | { type: "explanation"; content: ExplanationPayload }
   | { type: "progress"; content: { stage: string } }
   | { type: "done" }
   | { type: "error"; content: string | { code: string; message: string } }
@@ -163,6 +170,10 @@ export interface WSClientMessage {
   mode?: LearningMode
   accessToken?: string
   action?: "authenticate" | "message" | "submit_attempt" | "reveal_solution" | "restore_exercise" | "cancel"
+    | "continue_learning" | "deepen_unit"
+  fromRequestId?: string
+  unitId?: string
+  displayText?: string
   exerciseId?: string
   answer?: string
   hintsUsed?: number
@@ -230,7 +241,13 @@ export function parseServerMessage(raw: string): (WSServerMessage & { request_id
   try {
     const obj = JSON.parse(raw) as Partial<WSServerMessage> & { type?: string }
     if (!obj || typeof obj !== "object" || typeof obj.type !== "string") return null
+    if (isExplanationEventType(obj.type)) {
+      const envelope = obj as { request_id?: unknown; session_id?: unknown; content?: unknown }
+      if (typeof envelope.request_id !== "string" || typeof envelope.session_id !== "string"
+          || !validExplanationEvent(obj.type, envelope.content)) return null
+    }
     if (obj.type === "token" && (!("content" in obj) || typeof obj.content !== "string")) return null
+    if (obj.type === "document_snapshot" && !isEducationalDocument(obj.content)) return null
     if (obj.type === "content_delta" && (!obj.content || (obj.content.text !== null && typeof obj.content.text !== "string"))) return null
     if (obj.type === "card_ready" && (!obj.content?.card || !["exercise", "explanation", "correction", "solution"].includes(obj.content.kind))) return null
     if (obj.type === "response_complete" && (!("content" in obj) || typeof obj.content?.text !== "string")) return null

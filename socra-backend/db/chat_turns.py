@@ -24,7 +24,7 @@ async def session_turn(session_id: str, user_id: str):
         logger.warning("chat_lock_failed error_type=%s", type(exc).__name__)
         acquired = False
     try:
-        yield acquired
+        yield lease if acquired else None
     finally:
         if acquired:
             try:

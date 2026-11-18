@@ -138,3 +138,262 @@ explanationFixtures.exhaustive = {
     guide.sections.at(-1),
   ],
 }
+
+// Synthetic model outputs in the Phase 7 serializer shape. Values are test inputs only.
+export function phase7Fixture(scenario = "course") {
+  const titles = {
+    concept: "Fixture concept", derivation: "Fixture derivation", worked_calculation: "Fixture calculation",
+    comparison: "Fixture comparison", figure_walkthrough: "Fixture figure", rule_examples: "Fixture rule",
+    exercise: "Fixture question", lab_step: "Fixture KNIME step", research_finding: "Fixture finding",
+    transition: "Part II", front_matter: "Contents", summary: "Recap",
+  }
+  const kinds = scenario === "course" ? Object.keys(titles).filter((kind) => kind !== "exercise" && kind !== "lab_step")
+    : scenario === "exercises" ? ["exercise", "exercise", "exercise"] : ["lab_step", "lab_step", "lab_step"]
+  const statuses = ["partial", "not_generated"]
+  const request_id = "request-" + scenario
+  const document_id = "synthetic-pdf-" + scenario
+  const source_hash = "synthetic-index"
+  const generation = 4
+  const rows = kinds.map((kind, i) => {
+    const logical_id = scenario + "-" + (i + 1)
+    const content_version = "content-" + logical_id
+    const skipped = scenario === "exercises" && i === 2
+    const nonTeaching = ["transition", "front_matter", "summary"].includes(kind)
+    const status = skipped || nonTeaching ? "skipped" : statuses[i] ?? "explained"
+    const pages = [i + 1, i + 1]
+    const title = titles[kind]
+    const verification = status === "skipped" ? "not_applicable" : i === 0 ? "review_failed"
+      : i === 1 ? "unreviewed" : "reviewed"
+    const unverifiable_source = i === 0 ? [{ page: i + 1, status: "unverifiable_source", reason: "preparation_pending" }] : []
+    const missing_item_ids = i < 2 ? ["requirement-" + logical_id] : []
+    const scope_reason = skipped ? "exercise_excluded" : nonTeaching ? "non_teaching" : "requested"
+    return { kind, label: scenario === "course" ? "II." + (i + 1) : String(i + 1),
+      progress: { logical_id, title, content_version, status, pages, missing_item_ids,
+        verification, unverifiable_source, scope_reason } }
+  })
+  const progress = rows.map((row) => row.progress)
+  const sectionRows = rows.filter(({ progress }) => progress.scope_reason !== "non_teaching")
+    .map(({ kind, label, progress }) => ({
+      id: progress.logical_id, title: progress.title, content_version: progress.content_version,
+      label, kind, start: progress.pages[0], end: progress.pages[1],
+      status: { explained: "covered", partial: "partial" }[progress.status] ?? "not_yet_generated",
+    }))
+  const units = rows.filter(({ progress }) => progress.status !== "skipped").map(({ kind, progress }) => {
+    const { logical_id, title, content_version, status, verification, missing_item_ids, unverifiable_source, pages } = progress
+    return {
+      logical_id, title, content_version, coverage: status, verification, confidence: status === "explained" ? "high" : "low",
+      missing_item_ids, unverifiable_source, verified_facts: [], findings: [],
+      interruptions: status === "not_generated" ? ["call_budget"] : [],
+      sources: status === "not_generated" ? [] : [{ page: pages[0], start: 0, end: 22, quote: "Synthetic source text." }],
+      blocks: status === "not_generated" ? [] : [{ kind: { exercise: "final_answer", lab_step: "command_or_ui" }[kind] ?? "explanation",
+        block_id: "block-" + logical_id, text: "Synthetic source text.", provenance: "course", source_indexes: [1] },
+      { kind: "intuition", block_id: "example-" + logical_id, text: "A hypothetical example.",
+        provenance: "supplementary", hypothetical: true, source_indexes: [] }],
+    }
+  })
+  const change = { block_id: units[0].blocks[0].block_id, old_quote: "Earlier fixture text.",
+    new_quote: units[0].blocks[0].text, reason: "review_repair", severity: "high" }
+  const versions = units.map((output, i) => ({ request_id, stage: "ready", output,
+    change_log: i === 0 ? [change] : [], document_id, generation, source_hash, identity: sectionRows[i] }))
+  const next_actions = [
+    { action: "continue_learning", logical_id: progress[1].logical_id, request_id: "continue-" + scenario, attempt: 1 },
+    { action: "deepen_unit", logical_id: progress[0].logical_id, request_id: "deepen-" + scenario, attempt: 2 },
+  ]
+  const count = (key) => progress.reduce((counts, row) => ({ ...counts, [row[key]]: (counts[row[key]] ?? 0) + 1 }), {})
+  const ledger = { coverage_counts: count("status"), verification_counts: count("verification"),
+    remaining: [progress[1]], partial: [progress[0]], skipped_optional_items: {}, low_fidelity_pages: [1],
+    corrections: [{ logical_id: progress[0].logical_id, ...change }], next_actions }
+  const card = { ...empty, schema_version: 2, units, versions, language: "French", presentation: "full_course",
+    sections: [section(units[0].title, units[0].blocks[0].text)],
+    course_progress: { request_id, document_id, index_generation: generation, source_hash, sections: sectionRows,
+      part: 2, total_parts: 3, next_request_id: next_actions[0].request_id, inventory_uncertain: false,
+      learning_plan: { scope: Object.fromEntries(progress.map((row) =>
+        [row.logical_id, { in_scope: row.status !== "skipped", reason: row.scope_reason }])),
+      order: progress.filter((row) => row.status !== "skipped").map((row) => row.logical_id),
+      assumptions: [], depth: "exhaustive", level: "standard", required_items: {}, unverifiable_source: {},
+      remaining: ledger.remaining, next_actions, facts_ledger: [] } },
+    learning_state: { progress, facts: { verified_facts: [] }, next_actions }, coverage_ledger: ledger }
+  const draft = { ...versions[0], stage: "draft", change_log: [], output: { ...units[0],
+    verification: "unreviewed", blocks: [{ ...units[0].blocks[0], text: change.old_quote }] } }
+  const snapshot = { document_id, generation, source_hash, request_id, revision: 3, versions: [draft, ...versions], calls: [] }
+  return { card, draft, snapshot, change }
+}
+
+const instructionalBlocks = {
+  concept: [
+    ["takeaway", "Fit preprocessing on the training split."],
+    ["explanation", "Leakage occurs when evaluation data influences the fitted model."],
+    ["source_example", "| Split | Rows |\n| --- | ---: |\n| Training | 80 |\n| Evaluation | 20 |", "course"],
+    ["intuition", "Imagine reading the answers before a quiz.", "supplementary", { hypothetical: true }],
+    ["check_question", "Which split should fit the scaler?"],
+  ],
+  derivation: [
+    ["given", "$P$ is precision and $R$ is recall."],
+    ["ordered_steps", "- Write the reciprocal sum.\n- Invert the arithmetic mean."],
+    ["result", "$$F_1 = \\frac{2PR}{P+R}$$", "derived"],
+    ["interpretation", "A low recall limits the harmonic mean."],
+  ],
+  worked_calculation: [
+    ["given_values", "| Label | Value |\n| --- | ---: |\n| True positives | 9 |\n| Positives | 12 |"],
+    ["formula", "~~~latex\nR = \\frac{TP}{P}\n~~~", "derived"],
+    ["substitution", "$R = 9/12$", "derived"],
+    ["calculation", "Divide 9 by 12.", "derived"],
+    ["result", "$R = 0{,}75$", "derived"],
+    ["verification", "The resulting proportion is within the valid interval.", "derived"],
+  ],
+  comparison: [
+    ["criteria", "Compare the methods by scope and assumptions."],
+    ["table", "| Criterion | Method A | Method B | Method C |\n| --- | --- | --- | --- |\n| Scope | Local | Global | Both |"],
+    ["interpretation", "Method B summarizes overall behavior."],
+    ["trade_off", "The local explanation may be easier to inspect for a single case."],
+  ],
+  figure_walkthrough: [
+    ["what_it_shows", "The chart compares two approaches."],
+    ["how_to_read", "1. Find the baseline.\n2. Read the value from the vertical axis."],
+    ["specific_reading", "The second bar appears close to 0.5.", "unverified", { approximate: true }],
+    ["takeaway", "Use the printed table to confirm exact values."],
+  ],
+  rule_examples: [
+    ["rule", "Apply the rule when the condition holds."],
+    ["sourced_examples", "**Source example.** The condition holds here.", "course"],
+    ["sourced_examples", "**Additional example.** Imagine the same condition in another sentence.", "supplementary", { hypothetical: true }],
+    ["interpretation", "The condition is the deciding factor."],
+    ["common_error", "Check the exception before applying the rule."],
+  ],
+  exercise: [
+    ["problem", "What fraction of 12 cases were detected if 9 were found?"],
+    ["method", "Divide the number found by the total."],
+    ["working", "1. Substitute $9$ and $12$.\n2. Reduce the fraction.", "derived"],
+    ["final_answer", "$3/4$", "derived"],
+    ["verification", "Multiplying $3/4$ by $12$ gives $9$.", "derived"],
+  ],
+  lab_step: [
+    ["action", "Open the workflow editor."],
+    ["command_or_ui", "1. Add a CSV Reader.\n2. Set the input file."],
+    ["code", "~~~powershell\r\nGet-Content -LiteralPath './example.csv'\r\n~~~"],
+    ["expected_result", "The preview shows the header and first rows."],
+    ["checkpoint", "Capture the node output and its row count."],
+    ["troubleshooting", "If columns are merged, confirm the separator."],
+  ],
+  research_finding: [
+    ["evidence", "| Group | Error | Sample size |\n| --- | --- | --- |\n| A | 9.4% | 120 |\n| B | 8.2% | 120 |", "course"],
+    ["interpretation", "The observed gap is 1.2 percentage points.", "derived"],
+    ["limitations", "The sample does not establish a causal effect."],
+    ["figure", "See the accompanying figure."],
+  ],
+}
+
+export function instructionalFixture(kind) {
+  const scenario = kind === "lab_step" ? "lab" : kind === "exercise" ? "exercises" : "course"
+  const { card } = phase7Fixture(scenario)
+  const identity = card.course_progress.sections.find((section) => section.kind === kind)
+  const template = card.units.find((unit) => unit.logical_id === identity.id)
+  const gap = kind === "figure_walkthrough"
+  const source = { page: 12, start: 5, end: 23, quote: "Synthetic evidence." }
+  const output = { ...template, blocks: instructionalBlocks[kind].map(([type, text, provenance = "course", extra], i) => ({
+    block_id: "instruction-" + (i + 1), kind: type, text, provenance,
+    source_indexes: provenance === "course" || provenance === "derived" ? [1] : [], ...extra,
+  })), sources: [source], coverage: gap ? "partial" : "explained", verification: gap ? "review_failed" : "reviewed",
+    missing_item_ids: gap ? ["figure-value"] : [],
+    unverifiable_source: gap ? [{ page: 12, status: "unverifiable_source", reason: "preparation_pending" }] : [] }
+  const version = { ...card.versions.find((row) => row.output.logical_id === identity.id), output, identity, change_log: [] }
+  const progress = { ...card.learning_state.progress.find((row) => row.logical_id === identity.id),
+    status: output.coverage, verification: output.verification, missing_item_ids: output.missing_item_ids,
+    unverifiable_source: output.unverifiable_source }
+  return { ...card, units: [output], versions: [version],
+    learning_state: { ...card.learning_state, progress: [progress], next_actions: [] },
+    course_progress: { ...card.course_progress, sections: [identity], next_request_id: null },
+    sections: [{ heading: "Legacy projection marker", content: "Legacy sample content." }] }
+}
+
+const shellRows = {
+  course: [
+    ["I.1", "Part I · Fundamentals", "concept", "skipped", "outside_requested_part"],
+    ["II.1", "Permutation importance", "concept", "explained"],
+    ["II.2", "Leakage detection", "concept", "explained"],
+    ["II.3", "Shapley value calculation", "worked_calculation", "partial"],
+    ["II.4", "SHAP waterfall", "figure_walkthrough", "not_generated"],
+    ["II.5", "Work through the example", "exercise", "not_generated"],
+    ["II.6", "LIME and SHAP", "comparison", "not_generated"],
+    ["II.7", "Model limitations", "concept", "not_generated"],
+    ["III.1", "Part III · Interpretable models", "concept", "skipped", "outside_requested_part"],
+    ["IV.1", "Part IV · Auditability", "concept", "skipped", "outside_requested_part"],
+    ["", "Recap", "summary", "skipped", "non_teaching"],
+  ],
+  exercises: [
+    ["Exercice 1", "Confusion matrix", "exercise", "explained"],
+    ["1.a", "Calculate precision", "exercise", "explained"],
+    ["1.b", "Calculate the F1 score", "exercise", "explained"],
+    ["Exercice 2", "Compare the two models", "exercise", "explained"],
+    ["2.a", "Compare precision", "exercise", "partial"],
+    ["2.b", "Discuss the trade-off", "exercise", "not_generated"],
+    ["Exercice 3", "Exercise 3 · SHAP", "exercise", "skipped", "exercise_excluded"],
+  ],
+  lab: [
+    ["Étape 1", "Import the data in KNIME", "lab_step", "explained"],
+    ["Étape 2", "Configure the partition", "lab_step", "partial"],
+    ["Étape 3", "Train the model", "lab_step", "not_generated"],
+    ["Étape 4", "Export the workflow", "lab_step", "not_generated"],
+  ],
+}
+
+export function documentFixture(shell) {
+  const document_id = "pdf-" + shell
+  const source_hash = "fixture-source"
+  const request_id = "saved-" + shell
+  const generation = 3
+  const rows = shellRows[shell].map(([label, title, kind, status, reason = "requested"], index) => {
+    const logical_id = shell + "-" + index
+    const page = index + 1
+    const identity = { id: logical_id, content_version: "content-" + logical_id, label, kind, title, start: page, end: page,
+      ...(shell === "exercises" && label === "1.b" ? { depends_on: [shell + "-1"] } : {}) }
+    const missing_item_ids = status === "partial" ? [shell + "-missing-item"] : []
+    const unverifiable_source = status === "partial" && shell === "lab" ? [{ page, status: "unverifiable_source", reason: "preparation_pending" }] : []
+    const verification = status === "explained" ? "reviewed" : status === "partial" ? "review_failed" :
+      status === "skipped" ? "not_applicable" : "unreviewed"
+    const progress = { logical_id, content_version: identity.content_version, pages: [page, page], status, title, scope_reason: reason,
+      verification, missing_item_ids, unverifiable_source }
+    return { identity, progress }
+  })
+  const units = rows.filter(({ progress }) => ["explained", "partial"].includes(progress.status)).map(({ identity, progress }) => {
+    const [base] = instructionalFixture(identity.kind).units
+    const { logical_id, content_version, title, status, verification, missing_item_ids, unverifiable_source } = progress
+    const blocks = base.blocks.filter((block) => !(shell === "lab" && status === "partial" && block.kind === "checkpoint"))
+    if (shell === "lab" && status === "explained") blocks.push({
+      block_id: logical_id + "-deliverable", kind: "deliverable", text: "Save the configured KNIME workflow.",
+      provenance: "course", source_indexes: [1],
+    })
+    return { ...base, logical_id, content_version, title, coverage: status, verification,
+      missing_item_ids, unverifiable_source, blocks, sources: [{ ...base.sources[0], page: progress.pages[0] }] }
+  })
+  const progress = rows.map((row) => row.progress)
+  const partial = progress.filter((row) => row.status === "partial")
+  const remaining = progress.filter((row) => row.status === "not_generated")
+  const scopes = Object.fromEntries(progress.map((row) => [row.logical_id, { in_scope: row.status !== "skipped", reason: row.scope_reason }]))
+  const next_actions = [{ action: "continue_learning", logical_id: remaining[0].logical_id, request_id: "continue-" + shell, attempt: 1 },
+    { action: "deepen_unit", logical_id: partial[0].logical_id, request_id: "deepen-" + shell, attempt: 2 }]
+  const versions = units.map((output) => ({ request_id, stage: "ready", output, change_log: [], document_id, source_hash, generation,
+    identity: rows.find(({ identity }) => identity.id === output.logical_id).identity }))
+  const count = (field) => progress.reduce((counts, row) => ({ ...counts, [row[field]]: (counts[row[field]] ?? 0) + 1 }), {})
+  const card = { ...empty, schema_version: 2, language: "French", presentation: "full_course", units, versions,
+    sections: [{ heading: "Legacy projection only", content: "Duplicate fallback content." }],
+    course_progress: { document_id, request_id, source_hash, index_generation: generation, part: 1, total_parts: 3,
+      next_request_id: next_actions[0].request_id, sections: rows.filter((row) => row.progress.status !== "skipped").map((row) => row.identity),
+      learning_plan: { assumptions: shell === "course" ? ["Part II follows the source headings."] : [],
+        order: progress.filter((row) => row.status !== "skipped").map((row) => row.logical_id), scope: scopes,
+        level: "intermediate", depth: "exhaustive", required_items: {}, unverifiable_source: {}, remaining,
+        next_actions, facts_ledger: [] } },
+    learning_state: { progress, next_actions, facts: { verified_facts: shell === "exercises" ? [
+      { unit_id: "exercises-2", content_version: "content-exercises-2", label_path: ["1.b", "F1"], value: "0,80",
+        verification: "deterministic_only" },
+      { unit_id: "exercises-4", content_version: "content-exercises-4", label_path: ["2.a"], value: "invalid sample value",
+        verification: "unreviewed" },
+    ] : [] } },
+    coverage_ledger: { coverage_counts: count("status"), verification_counts: count("verification"),
+      partial, remaining, low_fidelity_pages: shell === "lab" ? [2] : [], corrections: [], skipped_optional_items: {}, next_actions },
+  }
+  const checking = { request_id: next_actions[0].request_id, stage: "draft", document_id, source_hash, generation,
+    output: { ...units[0], logical_id: remaining[0].logical_id, content_version: remaining[0].content_version,
+      title: remaining[0].title, coverage: "partial", verification: "unreviewed" } }
+  return { card, checking }
+}

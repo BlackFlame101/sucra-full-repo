@@ -2,6 +2,10 @@ import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { explanationNoteText } from "@/lib/ai/explanation-note"
 import { readSavedExplanation } from "@/lib/server/saved-explanation"
 import { editableNote } from "@/lib/server/notebook"
+import { educationalCitations, isEducationalDocument } from "@/lib/educational-document"
+import { educationalNote, noteText } from "@/lib/notebook/document"
+import { validateNoteDocument } from "@/lib/notebook/schema"
+import type { Json } from "@/types/database"
 import { NextResponse } from "next/server"
 
 const sourceTypes = ["manual", "explanation", "exercise"] as const
@@ -74,12 +78,22 @@ export async function POST(request: Request) {
       explanation = await readSavedExplanation(supabase, user.id, courseId, body.source_data)
     }
     if (!explanation) return NextResponse.json({ error: "A completed or saved explanation is required." }, { status: 404 })
-    body.content = explanationNoteText(explanation)
-    editable.content = body.content
-    delete editable.content_json
+    if (isEducationalDocument(explanation)) {
+      try {
+        const doc = validateNoteDocument(educationalNote(explanation))
+        editable.content_json = doc as Json
+        editable.content = noteText(doc)
+      } catch {
+        return NextResponse.json({ error: "Could not read the saved educational document." }, { status: 422 })
+      }
+    } else {
+      editable.content = explanationNoteText(explanation)
+      delete editable.content_json
+    }
     body.source_data = { ...body.source_data, explanation }
-    body.source_document_id = explanation.citations?.[0]?.document_id
-    body.source_page = explanation.citations?.[0]?.page_number
+    const citations = isEducationalDocument(explanation) ? educationalCitations(explanation) : explanation.citations
+    body.source_document_id = citations[0]?.document_id
+    body.source_page = citations[0]?.page_number
   }
   let sourceDocumentId = typeof body.source_document_id === "string" ? body.source_document_id : null
   if (sourceDocumentId) {
@@ -104,6 +118,7 @@ export async function POST(request: Request) {
       session_id: body.source_data?.session_id,
       message_id: body.source_data?.message_id,
       explanation: body.source_data?.explanation,
+      ...(isEducationalDocument(body.source_data?.explanation) ? { initial_note_version: 1 } : {}),
     } : {},
     source_document_id: sourceDocumentId,
     source_page: sourceDocumentId && Number.isInteger(body.source_page) && body.source_page > 0 ? body.source_page : null,

@@ -8,6 +8,40 @@ from typing import Any
 
 
 _FENCE_RE = re.compile(r"^[ \t]*\x60{3}(?:json)?[ \t]*(?:\r?\n|(?=[{\[]))(.*?)^[ \t]*\x60{3}[ \t]*(?:\r?$)", re.IGNORECASE | re.DOTALL | re.MULTILINE)
+CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def has_control_characters(value: Any) -> bool:
+    if isinstance(value, str):
+        return CONTROL.search(value) is not None
+    if isinstance(value, dict):
+        return any(has_control_characters(key) or has_control_characters(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(has_control_characters(item) for item in value)
+    return False
+
+
+def gemini_response_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Avoid expanding nested array limits in Gemini's decoding constraint."""
+    result = schema.copy()
+    if result.get("type") == "array":
+        result.pop("maxItems", None)
+    for key in ("properties", "$defs"):
+        if key in result:
+            result[key] = {name: gemini_response_schema(child) for name, child in result[key].items()}
+    if "DraftClaim" in result.get("$defs", {}):
+        claim = result["$defs"]["DraftClaim"]
+        result["$defs"]["DraftClaim"] = {
+            "type": "object", "required": ["output_quote", "source_indexes"], "additionalProperties": False,
+            "properties": {"output_quote": {"type": "string"}, "source_indexes": claim["properties"]["source_indexes"]},
+        }
+    for key in ("anyOf", "oneOf", "allOf", "prefixItems"):
+        if key in result:
+            result[key] = [gemini_response_schema(child) for child in result[key]]
+    for key in ("items", "additionalProperties"):
+        if isinstance(result.get(key), dict):
+            result[key] = gemini_response_schema(result[key])
+    return result
 
 
 def message_text(content: Any) -> str:

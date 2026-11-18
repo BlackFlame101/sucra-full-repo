@@ -1,0 +1,261 @@
+{
+  "source_sha256": "3203a05e7a063c3a4e9d04894e035cca7541342b694dafa2fb4c73b4d7ed4fe8",
+  "unit_id": "82fb4dd23705f19401132aca",
+  "checklist": [
+    {
+      "item_id": "72fbd84380031427c2769789d40853c6347ef2c78e4667111ab6a06e0e04ac2b",
+      "type": "command",
+      "text": "Objectif : charger les transactions dans un DataFrame Spark en contrôlant les types des colonnes.",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1375,
+          "end": 1472,
+          "quote": "Objectif : charger les transactions dans un DataFrame Spark en contrôlant les types des colonnes."
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "2487968659325897ce131e2fb4e94e3a20294ae17ba8469ffdb0246f11a034fb",
+      "type": "command",
+      "text": "from pyspark.sql.types import (",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1474,
+          "end": 1505,
+          "quote": "from pyspark.sql.types import ("
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "8627b2da65c7f1eb6bf9ad191436037e6b003aee4fbd79315f7ff72f1abc727e",
+      "type": "command",
+      "text": "StructType, StructField, LongType, IntegerType, DoubleType",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1506,
+          "end": 1564,
+          "quote": "StructType, StructField, LongType, IntegerType, DoubleType"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "b21b09f8a7c127d0250dacbcb2341eeb22b6beb8690ef174c8aabc0df546d11e",
+      "type": "command",
+      "text": ") schema_tx = StructType([",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1565,
+          "end": 1591,
+          "quote": ")\nschema_tx = StructType(["
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "79756718f3ce2f58deb8b5dc39de30287b8dc342f1e7c972c0bc223949171296",
+      "type": "command",
+      "text": "StructField(\"id_transaction\", LongType(), True),",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1592,
+          "end": 1640,
+          "quote": "StructField(\"id_transaction\", LongType(), True),"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "fcd195c2072a5762c37ba6ae702517be1489fe939989510e92db6f841f63d656",
+      "type": "command",
+      "text": "StructField(\"montant\", DoubleType(), True),",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1641,
+          "end": 1684,
+          "quote": "StructField(\"montant\", DoubleType(), True),"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "08a467e35885f27a55244a3ad315d37fda783519e89f94eaac9627ad6352b3bb",
+      "type": "command",
+      "text": "StructField(\"heure\", IntegerType(), True),",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1685,
+          "end": 1727,
+          "quote": "StructField(\"heure\", IntegerType(), True),"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "2ce7dba7861fd363cea87d261e08b0de7fbd0b0009a445e9bee0b9df586ad38f",
+      "type": "command",
+      "text": "StructField(\"pays_different\", IntegerType(), True),",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1728,
+          "end": 1779,
+          "quote": "StructField(\"pays_different\", IntegerType(), True),"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "33cec50f08591c8b9587ca7061f7ab13033ca852a7fe1d5eb07c615f2ef8370b",
+      "type": "command",
+      "text": "StructField(\"nb_tentatives\", IntegerType(), True),",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1780,
+          "end": 1830,
+          "quote": "StructField(\"nb_tentatives\", IntegerType(), True),"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "3dd39b9e76ccb8187416a8f1d891561ab7eee56efa457431b2fc775f10990c80",
+      "type": "command",
+      "text": "StructField(\"fraude\", DoubleType(), True)",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1831,
+          "end": 1872,
+          "quote": "StructField(\"fraude\", DoubleType(), True)"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "4162dbb0251f110b93411feada84fcb830dd0952fc9dade79b2030e933184da3",
+      "type": "command",
+      "text": "]) transactions_brutes = ( spark.read.schema(schema_tx)",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1873,
+          "end": 1928,
+          "quote": "])\ntransactions_brutes = (\nspark.read.schema(schema_tx)"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "cd8a0ffa1cf98fb1f19eee5a8da54fb6eaa34e4bfa36d6d8d23e483ea9ce173a",
+      "type": "command",
+      "text": ".json(str(chemin_json.resolve()))",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1929,
+          "end": 1962,
+          "quote": ".json(str(chemin_json.resolve()))"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "610781b5c64ccccb6dd2e278c0176acc7160478c6f61a05b6c09626061d3e511",
+      "type": "command",
+      "text": ") transactions_brutes.printSchema() transactions_brutes.show(5, truncate=False) print(\"Nombre de transactions :\", transactions_brutes.count()) transactions_brutes.groupBy(\"fraude\").count().show()",
+      "anchors": [
+        {
+          "page": 2,
+          "start": 1963,
+          "end": 2158,
+          "quote": ")\ntransactions_brutes.printSchema()\ntransactions_brutes.show(5, truncate=False)\nprint(\"Nombre de transactions :\", transactions_brutes.count())\ntransactions_brutes.groupBy(\"fraude\").count().show()"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "8327bc9e1e3c3f337f926790d5314c757c8843c44e3f74d8125cfd802dcc6824",
+      "type": "command",
+      "text": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi",
+      "anchors": [
+        {
+          "page": 3,
+          "start": 0,
+          "end": 69,
+          "quote": "5e année IADATA | Processus Big Data Décisionnel Par Pr Boubker Sbihi"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "4f437bcfd443a1342ec6d15345d6d33d85f66ae3f0cdb02957a0bde524105bb0",
+      "type": "command",
+      "text": "TP Spark MLlib –Par Pt Boubker Sbihi",
+      "anchors": [
+        {
+          "page": 3,
+          "start": 71,
+          "end": 107,
+          "quote": "TP Spark MLlib –Par Pt Boubker Sbihi"
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "19ec9bd3ae394a80c53d8cfe8295fa486aa52075b7092bf9f79b43663a5781fd",
+      "type": "command",
+      "text": "À analyser – Pourquoi le format JSON Lines est-il adapté à une lecture ligne par ligne ? Que se passerait-il si le fichier était un tableau JSON multiligne ? Quel est l’intérêt du schéma explicite ? Identifier la cible et les variables explicatives.",
+      "anchors": [
+        {
+          "page": 3,
+          "start": 109,
+          "end": 359,
+          "quote": "À analyser – Pourquoi le format JSON Lines est-il adapté à une lecture ligne par ligne ? Que se passerait-il si le fichier était\n\nun tableau JSON multiligne ? Quel est l’intérêt du schéma explicite ? Identifier la cible et les variables explicatives."
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    },
+    {
+      "item_id": "ff7ce4a68b5e4ce144f2eb80720ffc7c4e8525f0996745d5d78fd849ecee663d",
+      "type": "command",
+      "text": "Indication : JSON Lines contient un objet JSON par ligne. Pour un document JSON composé d’un tableau multiligne, tester l’option multiLine=True.",
+      "anchors": [
+        {
+          "page": 3,
+          "start": 361,
+          "end": 505,
+          "quote": "Indication : JSON Lines contient un objet JSON par ligne. Pour un document JSON composé d’un tableau multiligne, tester\nl’option multiLine=True."
+        }
+      ],
+      "importance": "essential",
+      "facts": []
+    }
+  ]
+}

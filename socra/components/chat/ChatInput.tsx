@@ -111,7 +111,7 @@ export function ChatInput({ value, onChange, onSubmit, isDisabled, onAttach }: C
           </Button>
         </div>
       </div>
-      <p className="text-center text-[10px] uppercase tracking-widest text-muted-foreground/50 mt-2">
+      <p className="text-center text-[10px] uppercase tracking-widest text-muted-foreground mt-2">
         Socra encourages inquiry-based learning. Direct answers are rarely given.
       </p>
     </div>

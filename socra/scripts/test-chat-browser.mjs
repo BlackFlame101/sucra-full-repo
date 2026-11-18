@@ -21,6 +21,9 @@ const sources = {
 }
 for (const [name, path] of [
   ["@/lib/socra-ws", "lib/socra-ws.ts"],
+  ["@/lib/explanation-v2", "lib/explanation-v2.ts"],
+  ["@/lib/educational-document", "lib/educational-document.ts"],
+  ["@/lib/documents/pdf-page", "lib/documents/pdf-page.ts"],
   ["@/lib/ai/model-policy", "lib/ai/model-policy.ts"],
   ["model-resolver", "lib/ai/model-resolver.ts"],
   ["settings", "hooks/useUserSettings.ts"],
@@ -33,6 +36,8 @@ for (const [name, path] of [
 const suite = async function (modules) {
   const cache = {}
   const load = (name) => {
+    if (name === "./explanation-v2") name = "@/lib/explanation-v2"
+    if (name === "./educational-document") name = "@/lib/educational-document"
     if (!cache[name]) {
       const entry = { exports: {} }
       new Function("module", "exports", "require", "process", modules[name])(
@@ -82,7 +87,7 @@ const suite = async function (modules) {
     }
     push(type, content, request_id, sequence) {
       this.dispatchEvent(new MessageEvent("message", {
-        data: JSON.stringify({ type, content, request_id, sequence, version: 2 }),
+        data: JSON.stringify({ type, content, request_id, session_id: "fixture", sequence, version: 2 }),
       }))
     }
   }
@@ -133,9 +138,30 @@ const suite = async function (modules) {
   socket.push("content_delta", { text: "draft" }, id, 4)
   socket.push("content_delta", { text: "duplicate" }, id, 4)
   await wait(() => chat.messages[1].parts[0].text === "First draft", "Delta batching or sequence filtering failed")
+  const unit = { logical_id: "u", title: "Unit", content_version: "hash", coverage: "partial",
+    verification: "unreviewed", blocks: [{ block_id: "b", kind: "explanation", text: "Draft block",
+      provenance: "supplementary", source_indexes: [] }], sources: [], missing_item_ids: ["requirement"],
+    unverifiable_source: [], verified_facts: [] }
+  const draft = { request_id: id, document_id: "pdf", generation: 4, source_hash: "pdf-hash",
+    stage: "draft", output: unit, change_log: [] }
+  const ready = { ...draft, stage: "ready", output: { ...unit, coverage: "not_generated", blocks: [] } }
+  const state = () => [...chat.explanationUnits.values()][0]
+  socket.push("unit_draft", { ...draft, output: { ...unit, logical_id: "foreign" } }, "another-request", 1)
+  socket.push("prep_status", { document_id: "pdf", status: "loading" }, id, 5)
+  await wait(() => chat.explanationTurns.get(id)?.stream.preparation?.status === "loading", "Preparation was lost before the first draft")
+  socket.push("unit_checking", unit, id, 7)
+  socket.push("unit_draft", draft, id, 6)
+  await wait(() => state()?.lifecycle === "checking", "Late draft did not retain the checking lifecycle")
+  check(chat.explanationUnits.size === 1 && state().current.output.blocks[0].text === "Draft block",
+    "Draft content was lost or a foreign request entered the current turn")
+  socket.push("unit_ready", ready, id, 8)
+  socket.push("unit_draft", draft, id, 6)
+  await wait(() => state()?.lifecycle === "ready", "Ready unit was missing")
+  check(state().current.output.coverage === "not_generated" && state().versions.length === 2,
+    "Readiness promoted coverage or duplicate drafts produced duplicate versions")
   chat.stop()
   check(socket.sent.at(-1).action === "cancel", "Stop did not reach the server")
-  socket.push("cancelled", null, id, 5)
+  socket.push("cancelled", null, id, 9)
   await wait(() => chat.status === "ready" && chat.messages[1].metadata?.partial, "Cancellation stayed busy")
   chat.regenerate()
   await wait(() => socket.sent.length === 4, "Retry was never dispatched")
@@ -151,6 +177,9 @@ const suite = async function (modules) {
   const recovered = sockets[1]
   await authenticate(recovered)
   check(recovered.sent[1].requestId === id && chat.messages.length === 2, "Reconnect lost the idempotency key")
+  recovered.push("unit_ready", { ...ready, replayed: true }, id, 1)
+  await wait(() => state()?.lifecycle === "ready", "Cancellation lost a ready checkpoint")
+  check(state().versions.length === 2, "Reconnect duplicated the unit version")
   const explanation = { definition: "Verified", check_question: "Why compare the same metric?" }
   recovered.push("content_delta", { text: explanation.check_question }, id, 1)
   await wait(() => chat.messages[1].parts[0].text === explanation.check_question, "Question preview was missing")
@@ -165,12 +194,19 @@ const suite = async function (modules) {
   await wait(() => chat.status === "ready" && chat.messages[1].id === "persisted", "Completion did not release input")
   check(chat.messages.filter((message) => message.id === "persisted").length === 1, "Replay duplicated a persisted explanation card")
   check(chat.messages[1].metadata.explanation.definition === "Verified", "Final card was lost")
+  check(state()?.current.output.coverage === "not_generated", "Legacy card overwrote structured event state")
   recovered.push("context_update", { key_terms: ["late"] }, id, 4)
   await wait(() => context?.key_terms[0] === "late", "Late context was lost")
   recovered.push("done", null, id, 5)
   chat.regenerate()
   await wait(() => recovered.sent.length === 3, "Regenerate did not dispatch")
   check(recovered.sent.at(-1).requestId !== id && chat.messages.length === 4, "Regenerate should create a new turn")
+  const lateUnit = { ...draft, stage: "ready", output: { ...unit, logical_id: "earlier-unit" } }
+  recovered.push("unit_ready", lateUnit, id, 6)
+  recovered.push("unit_correction", { logical_id: "earlier-unit", content_version: "hash",
+    version_request_id: id, generation: 4, block_id: "b", old_quote: "Old text", new_quote: "Draft block" }, id, 7)
+  await wait(() => chat.explanationTurns.get(id)?.stream.corrections.length === 1, "Late correction was lost")
+  check(!chat.explanationTurns.has(recovered.sent.at(-1).requestId), "An earlier correction entered the active turn")
   app.unmount()
 
   const reloaded = createRoot(host)
@@ -184,6 +220,22 @@ const suite = async function (modules) {
   check(afterRefresh.sent[1].requestId === recovered.sent.at(-1).requestId, "Refresh retry created a duplicate request")
   await wait(() => chat.error?.message.includes("stopped responding"), "Silent socket did not time out")
   check(chat.status === "error", "Timeout left chat busy")
+  const next = { action: "continue_learning", request_id: "fixture-next", logical_id: "next-unit" }
+  chat.runUnitAction("stored-turn", next, "Continuer : II.4")
+  await wait(() => sockets.length === 4, "Continue did not reconnect")
+  const actionsSocket = sockets[3]
+  await authenticate(actionsSocket)
+  let sent = actionsSocket.sent.at(-1)
+  check(sent.action === "continue_learning" && sent.mode === "explain" && sent.fromRequestId === "stored-turn"
+    && sent.requestId === next.request_id && !sent.unitId, "Continue altered the backend descriptor")
+  actionsSocket.push("response_complete", { message_id: "continued", text: "Next unit saved." }, next.request_id, 1)
+  await wait(() => chat.status === "ready", "Continue did not finish")
+  const deepen = { action: "deepen_unit", request_id: "fixture-deepen", logical_id: "earlier-partial" }
+  chat.runUnitAction("stored-turn", deepen, "Approfondir II.3")
+  await wait(() => actionsSocket.sent.length === 3, "Deepen did not send")
+  sent = actionsSocket.sent.at(-1)
+  check(sent.action === "deepen_unit" && sent.mode === "explain" && sent.fromRequestId === "stored-turn"
+    && sent.requestId === deepen.request_id && sent.unitId === deepen.logical_id, "Deepen lost its exact unit or request ID")
   reloaded.unmount()
 }
 

@@ -2,9 +2,10 @@ import { createHash } from "node:crypto"
 import { NextResponse } from "next/server"
 import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { explanationNoteText } from "@/lib/ai/explanation-note"
-import { markdownNote, noteText, readNoteDocument, selectNoteText } from "@/lib/notebook/document"
+import { educationalNote, markdownNote, noteText, readNoteDocument, selectNoteText } from "@/lib/notebook/document"
+import { educationalCitations, isEducationalDocument } from "@/lib/educational-document"
 import { notebookId, validateNoteDocument } from "@/lib/notebook/schema"
-import type { ExerciseCitation, PublicCorrection, PublicExplanation, SuggestedReadingItem } from "@/lib/socra-ws"
+import type { ExerciseCitation, ExplanationPayload, PublicCorrection, SuggestedReadingItem } from "@/lib/socra-ws"
 import type { Json } from "@/types/database"
 
 const fail = (error: string, status: number) => NextResponse.json({ error }, { status })
@@ -26,15 +27,16 @@ export async function POST(request: Request) {
     .eq("id", body.message_id).eq("session_id", session.id).eq("role", "assistant").maybeSingle()
   if (!message) return fail("Wait for the response to finish saving, then try again.", 404)
   const metadata = (message.metadata ?? {}) as {
-    explanation?: PublicExplanation; correction?: PublicCorrection; exercise?: unknown; exercise_id?: string
+    explanation?: ExplanationPayload; correction?: PublicCorrection; exercise?: unknown; exercise_id?: string
     course_context?: { suggested_readings?: SuggestedReadingItem[] }
   }
   const explanation = metadata.explanation
+  const educational = isEducationalDocument(explanation) ? explanation : null
   const correction = metadata.correction
   const kind = explanation ? "explanation" : correction ? "exercise" : "tutor"
   if (metadata.exercise && !correction) return fail("Save the feedback after answering the exercise.", 400)
   let content = message.content
-  const explanationCitations = explanation && [
+  const explanationCitations = isEducationalDocument(explanation) ? educationalCitations(explanation) : explanation && [
     ...(explanation.citations ?? []), ...(explanation.sections ?? []).flatMap((section) => section.citations ?? []),
   ]
   let citations: ExerciseCitation[] = explanationCitations ?? correction?.citations ??
@@ -83,7 +85,7 @@ export async function POST(request: Request) {
     })
   }
 
-  if (explanation) {
+  if (explanation && !isEducationalDocument(explanation)) {
     const authorized = new Map(citations.map((citation) => [
       citation.document_id + ":" + citation.page_number, citation,
     ]))
@@ -97,7 +99,7 @@ export async function POST(request: Request) {
     })
   }
   let doc
-  try { doc = validateNoteDocument(markdownNote(content)) }
+  try { doc = validateNoteDocument(educational ? educationalNote(educational) : markdownNote(content)) }
   catch { return fail("This response could not be converted into a note.", 422) }
   const selection = body.selection?.replace(/\s+/g, " ").trim()
   const nodes = selection ? selectNoteText(doc, selection) : doc.content
@@ -111,7 +113,8 @@ export async function POST(request: Request) {
       legacy = { original: note.content, nodes: readNoteDocument(null, note.content, note.source_type !== "manual").content as Json }
     }
   }
-  const { data, error } = await service.rpc("capture_notebook_response", {
+  const capture = educational && !body.note_id && !selection ? "capture_educational_document" : "capture_notebook_response"
+  const { data, error } = await service.rpc(capture, {
     owner: user.id, request: body.request_id, destination: body.note_id ?? null,
     source_course: body.course_id, source_session: session.id, source_message: body.message_id,
     source_kind: kind, source_citations: citations.map(({ document_id, filename, page_number }) => ({ document_id, filename, page_number })),

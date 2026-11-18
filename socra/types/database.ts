@@ -414,6 +414,7 @@ export type Database = {
           fingerprint_arg: string; note_title: string; body_nodes: Json; body_text: string; legacy_nodes: Json }
         Returns: Json
       }
+      capture_educational_document: Database["public"]["Functions"]["capture_notebook_response"]
       reserve_pdf_upload: {
         Args: { owner: string; course: string; upload_id: string; filename_arg: string; size_arg: number; digest_arg: string }
         Returns: { state: string; path?: string }

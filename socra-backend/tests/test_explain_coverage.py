@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from dataclasses import replace
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -175,8 +176,9 @@ class CoverageFlowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_summary_has_a_compact_generation_contract_with_both_flag_settings(self):
         body = "Visual pipelines let you prepare data, train models and compare results with a held-out dataset."
-        for flag in ("0", "1"):
-            with self.subTest(flag=flag), patch.dict(explicateur.os.environ, {"EXPLAIN_TASK_MODES": flag}):
+        for task_modes, intent_plans in product(("0", "1"), repeat=2):
+            flags = {"EXPLAIN_TASK_MODES": task_modes, "EXPLAIN_INTENT_PLANS": intent_plans}
+            with self.subTest(**flags), patch.dict(explicateur.os.environ, flags):
                 self.invoke.reset_mock()
                 self.invoke.return_value = SimpleNamespace(content=json.dumps({
                     "citations": [1], "sections": [{"heading": "Summary", "content": body}],

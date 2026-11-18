@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import logging
+from email.utils import parsedate_to_datetime
 from functools import lru_cache
+from math import isfinite
+from time import time
 from typing import Any
 
 import httpx
@@ -13,6 +16,7 @@ from langchain_core.runnables import RunnableLambda
 from openai import APIConnectionError
 
 from agents.metrics import ModelMetrics
+from agents.structured_output import gemini_response_schema
 from config import get_settings, resolve_google_model
 
 logger = logging.getLogger(__name__)
@@ -66,11 +70,34 @@ def is_transient_provider_error(exc: BaseException) -> bool:
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        status = getattr(current, "status_code", None) or getattr(current, "code", None)
-        if status in (500, 502, 503, 504) or isinstance(current, (httpx.TransportError, APIConnectionError)):
+        response = getattr(current, "response", None)
+        status = getattr(current, "status_code", None) or getattr(current, "code", None) \
+            or getattr(response, "status_code", None)
+        if status in (500, 502, 503, 504) or isinstance(current, (
+            httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, APIConnectionError,
+        )):
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def provider_retry_after(exc: BaseException) -> float | None:
+    """Read a standard Retry-After delay or HTTP date through provider wrappers."""
+    current = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        headers = getattr(response, "headers", None) or getattr(current, "headers", None) or {}
+        if value := headers.get("retry-after") or headers.get("Retry-After"):
+            try:
+                seconds = float(value) if value.isdecimal() else parsedate_to_datetime(value).timestamp() - time()
+                if isfinite(seconds):
+                    return max(0, seconds)
+            except (AttributeError, ValueError, TypeError, OverflowError, OSError):
+                pass
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def provider_error_code(exc: BaseException) -> str | None:
@@ -150,6 +177,7 @@ def get_chat_llm(
     model: str | None = None,
     provider: str | None = None,
     response_schema: dict[str, Any] | None = None,
+    bind_response_schema: bool = False,
     max_completion_tokens: int | None = None,
     single_attempt: bool = False,
     agent: str = "unknown",
@@ -164,6 +192,9 @@ def get_chat_llm(
     ``max_retries`` is honored by both provider integrations for streaming
     and non-streaming calls. Use ``single_attempt`` when the caller owns the
     retry budget, including any fallback.
+
+    Set ``bind_response_schema`` to opt a non-streaming Gemini call into
+    provider schema enforcement for this request.
     """
     chosen_provider = (provider or "google").strip().lower()
     chosen_key = (api_key or "").strip() or None
@@ -279,8 +310,12 @@ def get_chat_llm(
         max_retries=max_retries,
         timeout=45.0,
     )
-    if streaming and response_schema:
-        google_model = google_model.bind(response_mime_type="application/json", response_json_schema=response_schema)
+    if response_schema and (bind_response_schema or streaming
+                            or agent in {"explain_unit_generation", "explain_unit_repair"}):
+        google_model = google_model.bind(
+            response_mime_type="application/json",
+            response_json_schema=gemini_response_schema(response_schema),
+        )
     return monitor(google_model, google_model_id)
 
 

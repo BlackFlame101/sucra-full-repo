@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "{\n  \"reviews\": [\n    {\n      \"unit_id\": \"7c8d7c9c6d747737a13d2d67\",\n      \"pedagogy_score\": 3,\n      \"findings\": [],\n      \"ledger_updates\": [],\n      \"checklist_evidence\": [\n        {\n          \"item_id\": 1,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:1\",\n          \"quote\": \"Pour remédier à cette insuffisance, il convient de privilégier un CV sobre, clair et rigoureusement compatible avec les exigences des ATS, en éliminant les éléments graphiques superflus.\"\n        },\n        {\n          \"item_id\": 2,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:5\",\n          \"quote\": \"La solution corrective consiste à rédiger un profil professionnel précis et directement adapté au poste visé, mettant en avant des qualifications clés en lien avec la cible.\"\n        },\n        {\n          \"item_id\": 3,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:9\",\n          \"quote\": \"Pour corriger cette lacune, il est nécessaire d'illustrer les compétences techniques par des réalisations concrètes et mesurables.\"\n        },\n        {\n          \"item_id\": 4,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:13\",\n          \"quote\": \"L'action corrective consiste à préciser de manière exhaustive les missions réalisées, les outils mobilisés et les résultats obtenus.\"\n        },\n        {\n          \"item_id\": 5,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:17\",\n          \"quote\": \"La correction requiert de supprimer toutes les informations superflues, d'adopter une adresse e-mail strictement professionnelle et d'ajouter des liens pertinents vers les réseaux ou portfolios en ligne.\"\n        },\n        {\n          \"item_id\": 6,\n          \"block_id\": \"7c8d7c9c6d747737a13d2d67:21\",\n          \"quote\": \"La correction consiste à adapter le contenu du CV aux compétences et exigences propres de chaque offre d'emploi visée.\"\n        }\n      ]\n    }\n  ]\n}",
+            "thoughtSignature": "EokBCoYBAWkUfRMKe1498oEcMW0iuJmnyCi6D7YxY47w7A0q9hwEUxUHkRh1hZAcbqgZ5HCDVgA7SMklif5T/n6xPl0ymcO/aD3dWQRN8/jHPRJbp/HRa6ntqYPhgC1LBY1GpE9WuHMvsqpzCdi7bpJAtf//3WYRwcVLnfcsZfdGMvIKQn1LWZMVKdI="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 6532,
+    "candidatesTokenCount": 621,
+    "totalTokenCount": 7153,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 6532
+      }
+    ],
+    "serviceTier": "standard"
+  },
+  "modelVersion": "gemini-3.5-flash-lite",
+  "responseId": "m2n9aseuD6eK7M8P2rGB8AU"
+}

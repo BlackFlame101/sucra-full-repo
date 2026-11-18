@@ -1,9 +1,11 @@
-import { Node, getSchema } from "@tiptap/core"
+import { Extension, Node, getSchema } from "@tiptap/core"
 import StarterKit from "@tiptap/starter-kit"
 import TaskList from "@tiptap/extension-task-list"
 import TaskItem from "@tiptap/extension-task-item"
 import Mathematics from "@tiptap/extension-mathematics"
 import { safeNoteLink, type NoteDocument } from "./document"
+import { documentNodeId, sourceChecksum } from "@/lib/educational-document"
+import { pdfPageUrl } from "@/lib/documents/pdf-page"
 
 export const notebookId = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 
@@ -21,14 +23,58 @@ const SourceBlock = Node.create({
   },
 })
 
+const SourceCitation = Node.create({
+  name: "sourceCitation", group: "inline", inline: true, atom: true,
+  addAttributes: () => Object.fromEntries(
+    ["citationId", "documentId", "sourceHash", "page", "start", "end", "checksum"].map((key) => [key, { default: null }])
+  ),
+  renderHTML: ({ node }) => {
+    const { documentId, page, sourceHash } = node.attrs
+    return ["a", { href: pdfPageUrl(documentId, page, sourceHash), target: "_blank", rel: "noopener noreferrer",
+      class: "notebook-inline-citation", contenteditable: "false" }, "p. " + page]
+  },
+})
+
+const EducationalIdentity = Extension.create({
+  name: "educationalIdentity",
+  addGlobalAttributes: () => [
+    { types: ["heading"], attributes: { sectionId: { default: null } } },
+    { types: ["codeBlock"], attributes: { cellId: { default: null } } },
+  ],
+})
+
+const Table = Node.create({
+  name: "table", group: "block", content: "tableRow+", isolating: true,
+  parseHTML: () => [{ tag: "table" }],
+  renderHTML: () => ["table", ["tbody", 0]],
+})
+
+const TableRow = Node.create({
+  name: "tableRow", content: "(tableHeader|tableCell)+",
+  parseHTML: () => [{ tag: "tr" }], renderHTML: () => ["tr", 0],
+})
+
+const TableCell = Node.create({
+  name: "tableCell", content: "block+", isolating: true,
+  parseHTML: () => [{ tag: "td" }], renderHTML: () => ["td", 0],
+})
+
+const TableHeader = Node.create({
+  name: "tableHeader", content: "block+", isolating: true,
+  parseHTML: () => [{ tag: "th" }], renderHTML: () => ["th", { scope: "col" }, 0],
+})
+
 export const notebookExtensions = [
-  StarterKit.configure({ heading: { levels: [1, 2, 3] }, link: {
+  StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] }, link: {
     openOnClick: false, isAllowedUri: (href) => safeNoteLink(href),
   } }),
   TaskList,
   TaskItem.configure({ nested: true }),
   Mathematics.configure({ katexOptions: { throwOnError: false, trust: false } }),
   SourceBlock,
+  SourceCitation,
+  EducationalIdentity,
+  Table, TableRow, TableCell, TableHeader,
 ]
 
 const schema = getSchema(notebookExtensions)
@@ -49,6 +95,17 @@ export function validateNoteDocument(value: unknown): NoteDocument {
   doc.check()
   doc.descendants((node) => {
     if (node.type.name === "sourceBlock" && !notebookId.test(node.attrs.sourceId ?? "")) throw new Error("Invalid Socra source.")
+    if (node.type.name === "sourceCitation") {
+      const { citationId, documentId, sourceHash, page, start, end, checksum } = node.attrs
+      if (!documentNodeId.test(citationId) || !notebookId.test(documentId) || !sourceChecksum.test(sourceHash) ||
+          !sourceChecksum.test(checksum) || !Number.isSafeInteger(page) || page < 1 ||
+          !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start) {
+        throw new Error("Invalid PDF citation.")
+      }
+    }
+    for (const id of [node.attrs.sectionId, node.attrs.cellId]) {
+      if (id != null && !documentNodeId.test(id)) throw new Error("Invalid educational content identity.")
+    }
     if (["inlineMath", "blockMath"].includes(node.type.name) &&
         (typeof node.attrs.latex !== "string" || node.attrs.latex.length > 4_000)) throw new Error("Invalid equation.")
     for (const mark of node.marks) {

@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.mts",
+    ".next-socra-test/types/**/*.ts",
+    ".next-socra-test/dev/types/**/*.ts"
+  ]
+}

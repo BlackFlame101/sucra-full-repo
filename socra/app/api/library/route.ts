@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { readSavedExplanation } from "@/lib/server/saved-explanation"
+import { educationalCitations, isEducationalDocument } from "@/lib/educational-document"
 import { NextResponse } from "next/server"
 
 export async function GET() {
@@ -56,8 +57,9 @@ export async function POST(request: Request) {
     const explanation = await readSavedExplanation(supabase, user.id, course.id, body.content)
     if (!explanation) return NextResponse.json({ error: "A completed explanation from this inquiry is required." }, { status: 404 })
     body.content = { session_id: body.content.session_id, message_id: body.content.message_id, explanation }
-    body.source_document_id = explanation.citations?.[0]?.document_id
-    body.source_page = explanation.citations?.[0]?.page_number
+    const refs = isEducationalDocument(explanation) ? educationalCitations(explanation) : explanation.citations
+    body.source_document_id = refs[0]?.document_id
+    body.source_page = refs[0]?.page_number
   }
   let sourceDocumentId = typeof body.source_document_id === "string" ? body.source_document_id : null
   if (sourceDocumentId) {

@@ -220,6 +220,10 @@ body:has([data-dashboard-workspace]) {
 .notebook-prose li + li { margin-top: .3rem; }
 .notebook-prose a { color: var(--secondary); }
 .notebook-prose .katex-display > .katex { white-space: normal; }
+.notebook-prose table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.notebook-prose :is(th, td) { border: 1px solid var(--border); padding: .4rem .55rem; vertical-align: top; overflow-wrap: anywhere; }
+.notebook-prose th { background: var(--muted); text-align: start; }
+.notebook-prose .notebook-inline-citation { font-size: .75em; margin-inline-start: .2em; white-space: nowrap; }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {

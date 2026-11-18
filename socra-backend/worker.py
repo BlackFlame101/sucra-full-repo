@@ -1,6 +1,7 @@
 """Run durable PDF and exam processing separately from Uvicorn: uv run python -m worker."""
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -12,20 +13,27 @@ from datetime import datetime, timezone
 from pathlib import Path
 from shutil import which
 from time import monotonic
+from uuid import UUID
 
 from agents.course_summarizer import summarize_document
 from agents.llm import provider_error_code
 from config import get_settings
 from db.job_credentials import decrypt_key
-from db.jobs import claim_job, job_rpc
+from db.jobs import claim_job, job_rpc, rpc
 from db.supabase_client import get_supabase
 from rag.embeddings import embed_documents
 from rag.ocr import OcrInputError, SCANNED_MESSAGE, recognize_pages
+from rag.unit_map import EXTRACTOR_VERSION, bind_chunks, build_unit_map, unit_pipeline_enabled
+from rag.explain_documents import document_inventory_chunks
+from rag.explain_preparation import PREPARATION_VERSION, inspect_page, prepare_units, resolve_visuals
+from rag.explain_vision import configured_visual_services
 
 logger = logging.getLogger("socra.worker")
 PDF_EXTRACTOR = Path(__file__).resolve().parent.parent / "socra" / "scripts" / "extract-pdf.mjs"
 MAX_BYTES = 50 * 1024 * 1024
 CHUNK_CONFIG = "unpdf-1.6.0:lines-v1:3200-320-v1:retrieval-document"
+PDF_JOB_TIMEOUT = 210
+_EXTRA_NEWLINES = re.compile(r"\n{3,}")
 
 
 def index_config() -> str:
@@ -55,10 +63,16 @@ async def download_document(document: dict, owner: str) -> bytes:
     return data
 
 
-async def extract_pages(data: bytes, *, allow_scanned: bool = False) -> list[str]:
-    def extract() -> list[str]:
+async def extract_pages(data: bytes, *, allow_scanned: bool = False, layout: bool = False,
+                        evidence: bool = False) -> list:
+    def extract() -> list:
+        command = [os.environ.get("SOCRA_NODE_BIN", "node"), "--max-old-space-size=384", str(PDF_EXTRACTOR)]
+        if layout:
+            command.append("--layout")
+        if evidence:
+            command.append("--evidence")
         result = subprocess.run(
-            [os.environ.get("SOCRA_NODE_BIN", "node"), "--max-old-space-size=384", str(PDF_EXTRACTOR)],
+            command,
             input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
         )
         if result.returncode == 2:
@@ -70,15 +84,23 @@ async def extract_pages(data: bytes, *, allow_scanned: bool = False) -> list[str
         return json.loads(result.stdout)
 
     pages = await asyncio.to_thread(extract)
-    if not allow_scanned and not any(page.strip() for page in pages):
+    if not allow_scanned and not any((page["text"] if layout else page).strip() for page in pages):
         raise InvalidDocument(f"{SCANNED_MESSAGE} The PDF has no searchable text.")
     return pages
 
 
-def chunk_pages(pages: list[str]) -> list[dict]:
+def chunk_pages(pages: list[str], *, positions: bool = False) -> list[dict]:
     rows = []
     for page_number, page in enumerate(pages, 1):
-        text = re.sub(r"\n{3,}", "\n\n", page).strip()
+        text = _EXTRA_NEWLINES.sub("\n\n", page).strip()
+        if positions:
+            position = len(page) - len(page.lstrip())
+            tail = len(page.rstrip())
+            offsets = []
+            for match in _EXTRA_NEWLINES.finditer(page, position, tail):
+                offsets.extend(range(position, match.start() + 2))
+                position = match.end()
+            offsets.extend(range(position, tail))
         start = 0
         while start < len(text):
             end = min(start + 3_200, len(text))
@@ -89,6 +111,11 @@ def chunk_pages(pages: list[str]) -> list[dict]:
             content = text[start:end].strip()
             if content:
                 rows.append({"content": content, "page_number": page_number, "chunk_index": len(rows)})
+                if positions:
+                    left = start + len(text[start:end]) - len(text[start:end].lstrip())
+                    right = start + len(text[start:end].rstrip())
+                    rows[-1].update(start_offset=offsets[left], end_offset=offsets[right - 1] + 1,
+                                    source_offsets=offsets[left:right])
             if end == len(text):
                 break
             start = end - 320
@@ -114,6 +141,9 @@ async def document_job(job: dict) -> None:
     if not rows:
         raise Superseded
     doc = rows[0]
+    if job["kind"] == "unit_map":
+        await unit_map_job(job, doc)
+        return
     try:
         key = decrypt_key(job["encrypted_key"], str(doc["id"]))
     except ValueError as exc:
@@ -148,7 +178,10 @@ async def document_job(job: dict) -> None:
         config_key = index_config()
         if job.get("use_ocr"):
             config_key += ":ocr-tesseract-v1:" + os.getenv("SOCRA_OCR_LANGUAGES", "eng+fra")
-        if await job_rpc(job, "reuse_pdf_index", digest=digest, page_total=len(pages), config_key=config_key):
+        use_unit_map = unit_pipeline_enabled()
+        unit_map_fields = {"extractor_version": EXTRACTOR_VERSION} if use_unit_map else {}
+        reuse_rpc = "reuse_pdf_index_with_unit_map" if use_unit_map else "reuse_pdf_index"
+        if await job_rpc(job, reuse_rpc, digest=digest, page_total=len(pages), config_key=config_key, **unit_map_fields):
             timing(job, "index_reused", started, pages=len(pages))
             return
         stage = monotonic()
@@ -170,8 +203,9 @@ async def document_job(job: dict) -> None:
             row["embedding"] = encoded[row["content"]]
         await require_lease(job, "update_pdf_stage", state="indexing", label="Publishing search index")
         stage = monotonic()
-        await require_lease(job, "activate_versioned_pdf_index", digest=digest, page_total=len(pages),
-                            chunks=chunks, config_key=config_key)
+        activate_rpc = "activate_pdf_index_with_unit_map" if use_unit_map else "activate_versioned_pdf_index"
+        await require_lease(job, activate_rpc, digest=digest, page_total=len(pages),
+                            chunks=chunks, config_key=config_key, **unit_map_fields)
         timing(job, "vector_insert", stage, chunks=len(chunks))
     else:
         await require_lease(job, "update_pdf_stage", state="processing", label="Generating Course Map")
@@ -186,14 +220,105 @@ async def document_job(job: dict) -> None:
     timing(job, "total", started, pages=len(pages))
 
 
+async def unit_map_job(job: dict, document: dict) -> None:
+    data = await download_document(document, str(document["courses"]["user_id"]))
+    if hashlib.sha256(data).hexdigest() != job["content_hash"]:
+        raise InvalidDocument("The stored PDF changed before Unit Map extraction.")
+    preparation = unit_pipeline_enabled()
+    pages = await extract_pages(data, allow_scanned=bool(job.get("use_ocr")), layout=True, evidence=preparation)
+    if job.get("use_ocr"):
+        indexed_pages = job.get("pages")
+        if indexed_pages is None:
+            indexed_pages = await asyncio.to_thread(recognize_pages, data, [page["text"].strip() for page in pages])
+        pages = [page if page["text"].strip() == indexed else {"text": indexed}
+                 for page, indexed in zip(pages, indexed_pages, strict=True)]
+    skeleton = build_unit_map(str(document["id"]), pages)
+    bind_chunks(skeleton["units"], chunk_pages([page["text"] for page in pages], positions=True))
+    if preparation:
+        inspections = [inspect_page(i, page) for i, page in enumerate(pages, 1)]
+        for unit in skeleton["units"]:
+            unit["preparation_candidates"] = inspections[unit["start"][0] - 1:unit["end"][0]]
+    await require_lease(job, "publish_explain_unit_map", skeleton=skeleton, extractor_version=EXTRACTOR_VERSION)
+
+
+async def prepare_claimed_batch(jobs: list[dict], *, visual_services=None) -> None:
+    first = jobs[0]
+
+    async def checkpoint(job, evidence=None, *, failed=False):
+        return await job_rpc(job, "finish_explain_preparation", evidence=evidence, failed=failed)
+
+    active = list(jobs)
+    try:
+        async with asyncio.timeout(PDF_JOB_TIMEOUT):
+            def read():
+                client = get_supabase()
+                document = (client.table("documents")
+                            .select("id,course_id,filename,storage_path,file_size,page_count,index_chunk_count,"
+                                    "index_generation,index_config,index_stage,content_hash,courses!inner(user_id)")
+                            .eq("id", first["document_id"]).eq("index_generation", first["generation"])
+                            .eq("content_hash", first["source_hash"]).eq("index_status", "ready").single().execute().data)
+                skeleton = (client.table("explain_unit_maps").select("units")
+                            .eq("document_id", first["document_id"]).eq("generation", first["generation"])
+                            .eq("source_hash", first["source_hash"]).eq("extractor_version", EXTRACTOR_VERSION)
+                            .single().execute().data)
+                return document, skeleton["units"]
+
+            document, units = await asyncio.to_thread(read)
+            owner = str(document["courses"]["user_id"])
+            indexed, scope = await document_inventory_chunks(str(document["course_id"]), owner, document, [])
+            if scope != "full_document":
+                raise ValueError("Preparation requires a complete index")
+            data = await download_document(document, owner)
+            if hashlib.sha256(data).hexdigest() != first["source_hash"]:
+                raise InvalidDocument("Preparation PDF differs from the indexed source")
+            ocr = ":ocr-tesseract-v1:" in (document.get("index_config") or "")
+            pages = await extract_pages(data, allow_scanned=ocr, layout=True, evidence=True)
+            if ocr:
+                texts = await asyncio.to_thread(recognize_pages, data, [page["text"].strip() for page in pages])
+                pages = [page if page["text"].strip() == text else {"text": text, "ocr_confidence": None}
+                         for page, text in zip(pages, texts, strict=True)]
+            active = [job for job in jobs if await checkpoint(job)]
+            positioned = chunk_pages([page["text"] for page in pages], positions=True)
+            requested = {job["unit_id"] for job in active}
+            records = await asyncio.to_thread(prepare_units, units, pages, positioned, indexed,
+                                              source_hash=first["source_hash"], requested=requested)
+            if visual_services is not None:
+                render, vision, cache, budget = visual_services
+                await resolve_visuals(records, lambda asset: render(data, asset), vision, cache, budget=budget)
+            for job in active:
+                record = records.get(job["unit_id"])
+                await checkpoint(job, record, failed=record is None)
+    except Exception as exc:
+        logger.warning("explain_preparation_batch_failed type=%s", type(exc).__name__)
+        for job in active:
+            await checkpoint(job, failed=True)
+
+
+async def consume_preparation() -> None:
+    visual_services = configured_visual_services()
+    while True:
+        try:
+            jobs = await rpc("claim_explain_preparation", {"version": PREPARATION_VERSION})
+            if jobs:
+                await prepare_claimed_batch(jobs, visual_services=visual_services)
+            else:
+                await asyncio.sleep(2)
+        except Exception as exc:
+            logger.warning("explain_preparation_poll_failed type=%s", type(exc).__name__)
+            await asyncio.sleep(10)
+
+
 async def process_job(job: dict) -> None:
     started = monotonic()
     try:
         if job["attempts"] > 3:
-            await job_rpc(job, "fail_pdf_job", message="Processing was interrupted repeatedly. Retry to start again.",
-                          terminal=True)
+            if job["kind"] == "unit_map":
+                await job_rpc(job, "fail_explain_unit_map", terminal=True)
+            else:
+                await job_rpc(job, "fail_pdf_job", message="Processing was interrupted repeatedly. Retry to start again.",
+                              terminal=True)
             return
-        async with asyncio.timeout(210):
+        async with asyncio.timeout(PDF_JOB_TIMEOUT):
             await document_job(job)
     except Superseded:
         timing(job, "superseded", started)
@@ -201,6 +326,9 @@ async def process_job(job: dict) -> None:
         provider_code = provider_error_code(exc)
         timing(job, "failed", started, error_type=type(exc).__name__, provider_status=provider_code or "unknown")
         invalid = isinstance(exc, InvalidDocument)
+        if job["kind"] == "unit_map":
+            await job_rpc(job, "fail_explain_unit_map", terminal=invalid)
+            return
         key_error = provider_code in {"API_KEY_INVALID", "API_KEY_ACCESS_DENIED"}
         message = (
             str(exc) if invalid else
@@ -271,11 +399,35 @@ async def run() -> None:
     # One consumer per job kind. Exam generation also bounds per-slot concurrency.
     from exam_worker import consume_exam_jobs
 
-    await asyncio.gather(consume("index"), consume("summary"), cleanup_uploads(),
-                         consume_exam_jobs("generation", decrypt_key), consume_exam_jobs("grading", decrypt_key))
+    tasks = [consume("index"), consume("summary"), cleanup_uploads(),
+             consume_exam_jobs("generation", decrypt_key), consume_exam_jobs("grading", decrypt_key)]
+    if unit_pipeline_enabled():
+        tasks.extend((consume("unit_map"), consume_preparation()))
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    asyncio.run(run())
+    parser = argparse.ArgumentParser()
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--backfill-unit-maps", action="store_true")
+    commands.add_argument("--retry-unit-map", type=UUID, metavar="DOC_ID")
+    options = parser.parse_args()
+    if (options.backfill_unit_maps or options.retry_unit_map) and not unit_pipeline_enabled():
+        parser.error("Enable EXPLAIN_UNIT_PIPELINE before queueing a Unit Map job.")
+    if options.backfill_unit_maps:
+        async def backfill():
+            total = 0
+            fields = {"batch_size": 50, "extractor_version": EXTRACTOR_VERSION}
+            while queued := await rpc("backfill_explain_unit_maps", fields):
+                total += queued
+            logger.info("explain_unit_map_backfill queued=%d", total)
+
+        asyncio.run(backfill())
+    elif options.retry_unit_map:
+        if not asyncio.run(rpc("retry_failed_explain_unit_map", {"doc_id": str(options.retry_unit_map)})):
+            parser.exit(1, "No failed Unit Map job matched the current document generation.\n")
+        logger.info("explain_unit_map_retry_queued document_id=%s", options.retry_unit_map)
+    else:
+        asyncio.run(run())

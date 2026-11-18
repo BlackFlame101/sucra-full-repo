@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from agents.course_summarizer import DocumentSummary, summarize_document
 from rag.ocr import OcrInputError, recognize_pages
 from rag.retriever import retrieve_summary_guided_chunks
+from rag.unit_map import unit_pipeline_enabled
 from db.job_credentials import decrypt_key
 from worker import InvalidDocument, chunk_pages, extract_pages, process_job, remove_abandoned_uploads, remove_deleted_pdf_objects
 
@@ -33,7 +34,7 @@ class CourseMapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([section["page_start"] for section in result["sections"]], list(range(1, 7)))
 
 
-def fixture_pdf(pages: list[str]) -> bytes:
+def fixture_pdf(pages: list[str], *, raw_streams: bool = False) -> bytes:
     """Create a small, valid text PDF without third-party test dependencies."""
     page_ids = " ".join(f"{3 + i * 2} 0 R" for i in range(len(pages)))
     font = 3 + len(pages) * 2
@@ -42,11 +43,14 @@ def fixture_pdf(pages: list[str]) -> bytes:
         f"<< /Type /Pages /Count {len(pages)} /Kids [{page_ids}] >>",
     ]
     for i, text in enumerate(pages):
+        fonts = f"/F1 {font} 0 R" + (f" /F2 {font + 1} 0 R" if raw_streams else "")
         objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {4 + i * 2} 0 R "
-                       f"/Resources << /Font << /F1 {font} 0 R >> >> >>")
-        stream = f"BT /F1 12 Tf 40 730 Td ({text}) Tj ET" if text else ""
+                       f"/Resources << /Font << {fonts} >> >> >>")
+        stream = text if raw_streams else f"BT /F1 12 Tf 40 730 Td ({text}) Tj ET" if text else ""
         objects.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
     objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    if raw_streams:
+        objects.append("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
     pdf = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for i, obj in enumerate(objects, 1):
@@ -143,9 +147,9 @@ class WorkerTests(WorkerFixture, unittest.IsolatedAsyncioTestCase):
             if name == "publish_pdf_pages":
                 self.assertEqual(kwargs["digest"], digest)
                 self.assertEqual(kwargs["source_pages"], ["first", "second"])
-            if name == "reuse_pdf_index":
+            if name.startswith("reuse_pdf_index"):
                 return False
-            if name == "activate_versioned_pdf_index":
+            if name in {"activate_versioned_pdf_index", "activate_pdf_index_with_unit_map"}:
                 self.assertEqual(kwargs["page_total"], 2)
                 self.assertEqual(len(kwargs["chunks"]), 2)
             return True
@@ -162,7 +166,8 @@ class WorkerTests(WorkerFixture, unittest.IsolatedAsyncioTestCase):
              patch("worker.embed_documents", side_effect=embed), patch("worker.job_rpc", side_effect=rpc):
             await process_job(self.job)
         self.assertEqual(extract.await_count, 1)
-        self.assertLess(history.index("embed"), history.index("activate_versioned_pdf_index"))
+        activation = "activate_pdf_index_with_unit_map" if unit_pipeline_enabled() else "activate_versioned_pdf_index"
+        self.assertLess(history.index("embed"), history.index(activation))
 
     async def test_recovery_reuses_extraction_and_summary_failure_is_independent(self):
         digest = "a" * 64
@@ -204,16 +209,17 @@ class UploadReuseTests(WorkerFixture, unittest.IsolatedAsyncioTestCase):
         job = {**self.job, "pages": ["same"], "content_hash": "a" * 64}
         with patch("worker.job_rpc", AsyncMock(return_value=True)) as rpc, patch("worker.embed_documents", AsyncMock()) as embed:
             await process_job(job)
-        self.assertEqual([call.args[1] for call in rpc.await_args_list], ["publish_pdf_pages", "reuse_pdf_index"])
+        reuse = "reuse_pdf_index_with_unit_map" if unit_pipeline_enabled() else "reuse_pdf_index"
+        self.assertEqual([call.args[1] for call in rpc.await_args_list], ["publish_pdf_pages", reuse])
         embed.assert_not_awaited()
 
     async def test_duplicate_passages_preserve_page_citations_and_use_one_vector(self):
         job = {**self.job, "pages": ["same", "same"], "content_hash": "a" * 64}
         writes = []
         async def rpc(job, function, **kwargs):
-            if function == "reuse_pdf_index":
+            if function.startswith("reuse_pdf_index"):
                 return False
-            if function == "activate_versioned_pdf_index":
+            if function in {"activate_versioned_pdf_index", "activate_pdf_index_with_unit_map"}:
                 writes.extend(kwargs["chunks"])
             return True
         with patch("worker.job_rpc", side_effect=rpc), patch("worker.embed_documents", AsyncMock(return_value=[[0.2] * 768])) as embed:

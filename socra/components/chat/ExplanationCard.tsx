@@ -4,14 +4,19 @@ import { useId, useMemo, useRef, useState, useSyncExternalStore, type ComponentP
 import { ArrowRight, BookOpen, ChevronDown, CircleAlert, Library, NotebookPen } from "lucide-react"
 import type { Tokens } from "marked"
 import { Button } from "@/components/ui/button"
+import { ExplanationDocument } from "@/components/chat/ExplanationDocument"
+import { EducationalDocumentCard } from "@/components/chat/EducationalDocumentCard"
 import { StudyCode, StudyMarkdown, type StudyMarkdownPresentation } from "@/components/notebook/NotebookReply"
 import { pdfPageUrl } from "@/lib/documents/pdf-page"
+import { explanationV2, type UnitAction } from "@/lib/explanation-v2"
+import type { DocumentUnitContext } from "@/lib/explanation-document"
 import { explanationProgressKey, readExplanationProgress, writeExplanationProgress } from "@/lib/ai/explanation-progress"
 import {
   canPairSetup, cardMarkdownBlocks, citationPageKey, coverageCopy, coverageHighlights, explanationCardLayout, groupGuideSections, uniqueCardCitations,
   type CardMarkdown, type CardProfile, type CardSectionKind,
 } from "@/lib/ai/explanation-card-layout"
-import type { ExerciseCitation, PublicExplanation } from "@/lib/socra-ws"
+import { isEducationalDocument } from "@/lib/educational-document"
+import type { ExerciseCitation, ExplanationPayload, PublicExplanation } from "@/lib/socra-ws"
 
 const profileLabels: Partial<Record<CardProfile, string>> = {
   guide: "Walkthrough",
@@ -220,24 +225,41 @@ function ExplanationSection({ section, profile, collapse, open, checklist, numbe
 
 const subscribeToHydration = () => () => {}
 
-export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSaveToLibrary, notebookCapture, disabled = false, readOnly = false,
-  ownerId, explanationId, coursePartLinks }: {
-  explanation: PublicExplanation
+type CardProps = {
+  explanation: ExplanationPayload
   ownerId?: string
   explanationId?: string
   onDiscuss?: (question: string) => void
   onContinueCourse?: (from: string, requestId: string, label: string) => void
+  onUnitAction?: (from: string, action: UnitAction, label: string) => void
+  unitContext?: DocumentUnitContext
+  usedUnitRequests?: ReadonlySet<string>
   coursePartLinks?: Array<{ part: number; messageId: string }>
-  onSaveToLibrary?: (explanation: PublicExplanation) => void
+  onSaveToLibrary?: (explanation: ExplanationPayload) => void
   notebookCapture?: Pick<ComponentProps<"button">, "onPointerDown" | "onClick">
   disabled?: boolean
   readOnly?: boolean
-}) {
+}
+
+export function ExplanationCard(props: CardProps) {
+  const { explanation, disabled, notebookCapture, onSaveToLibrary, readOnly } = props
+  if (isEducationalDocument(explanation)) return <EducationalDocumentCard document={explanation}
+    disabled={disabled} notebookCapture={readOnly ? undefined : notebookCapture}
+    onSaveToLibrary={!readOnly && onSaveToLibrary ? () => onSaveToLibrary(explanation) : undefined} />
+  return <LegacyExplanationCard {...props} explanation={explanation} />
+}
+
+function LegacyExplanationCard({ explanation, onDiscuss, onContinueCourse, onUnitAction, unitContext, usedUnitRequests,
+  onSaveToLibrary, notebookCapture, disabled = false, readOnly = false, ownerId, explanationId, coursePartLinks }:
+  Omit<CardProps, "explanation"> & { explanation: PublicExplanation }) {
   const id = useId()
   const sectionList = useRef<HTMLDivElement>(null)
   const [taskChecks, setTaskChecks] = useState<{ key: string; checks: Record<number, boolean> }>()
   const hydrated = useSyncExternalStore(subscribeToHydration, () => true, () => false)
-  const layout = useMemo(() => explanationCardLayout(explanation), [explanation])
+  const structured = useMemo(() => explanationV2(explanation), [explanation])
+  const layout = useMemo(() => explanationCardLayout(structured
+    ? { ...explanation, sections: [], definition: "", intuition: "", course_example: "", citations: [], coverage_notices: [] }
+    : explanation), [explanation, structured])
   const { profile, notices, citations, definition, intuition, example, sections, title, collapsible } = layout
   const taskOriented = profile === "guide" || profile === "generic" && sections.some(({ code, text }) =>
     code || text.tokens.some((token) => token.type === "code"))
@@ -279,7 +301,8 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
     : explanation.presentation === "beginner" ? (french ? "Les bases du cours" : "Course foundations")
     : explanation.presentation === "full_course" ? (french ? "Étude du cours" : "Course study")
     : explanation.presentation === "standard" && french ? "Explication du cours" : undefined
-  const label = modeLabel ?? profileLabels[profile] ?? (profile === "generic" ? "Course explanation" : undefined)
+  const label = structured ? (french ? "Explication" : "Explanation")
+    : modeLabel ?? profileLabels[profile] ?? (profile === "generic" ? "Course explanation" : undefined)
   const continuationLabel = french ? `Continuer avec la partie ${(course?.part ?? 0) + 1}`
     : `Continue with part ${(course?.part ?? 0) + 1}`
   const coverageLabels = french ? {
@@ -287,6 +310,9 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
   } : {
     covered: "Covered", partial: "Partial", missing: "Missing", unverifiable: "Unverifiable", not_yet_generated: "Not yet generated",
   }
+  const from = course?.request_id
+  const unitAction = !readOnly && from && onUnitAction
+    ? (action: UnitAction, actionLabel: string) => onUnitAction(from, action, actionLabel) : undefined
   const compact = profile === "compact"
   const compactHeading = compact && !title && !definition.tokens.length && !intuition.tokens.length && sections.length === 1
     ? sections[0].heading : ""
@@ -300,7 +326,7 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
     </details>}
   </footer>
 
-  return <article aria-labelledby={id} data-explanation-card={profile}
+  return <article aria-labelledby={id} data-explanation-card={structured ? "structured" : profile}
     className="@container/card mb-4 w-full min-w-0 max-w-full rounded-2xl border border-primary/20 bg-card text-card-foreground shadow-sm [&_:is(p,blockquote,ol,ul):not(:has(pre,table))]:max-w-[46rem] print:border-0 print:shadow-none">
     <div className="space-y-3 px-4 pt-4 sm:px-6 sm:pt-5 print:px-0">
       <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
@@ -321,17 +347,20 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
           </Button>}
         </div>}
       </header>
-      {notices.length > 0 && <div className="space-y-1.5" role="status">
+      {!structured && notices.length > 0 && <div className="space-y-1.5" role="status">
         {notices.map((notice, index) => <CoverageNotice key={index} {...notice} />)}
       </div>}
-      {!!definition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-base">
+      {!structured && !!definition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-base">
         <SectionText text={definition} kind={null} profile={profile} checklist={checklist} />
       </div>}
-      {!!intuition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-[15px]">
+      {!structured && !!intuition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-[15px]">
         <StudyMarkdown tokens={intuition.tokens} presentation={{ checklist, codeLineEnding: intuition.codeLineEnding }} />
       </div>}
     </div>
-    {course && <div className="mx-4 space-y-2 border-t py-3 text-sm sm:mx-6">
+    {structured && <ExplanationDocument explanation={structured} french={french} context={unitContext}
+      onAction={unitAction} usedRequests={usedUnitRequests} disabled={disabled} ownerId={readOnly ? undefined : ownerId}
+      onDiscuss={readOnly ? undefined : onDiscuss} />}
+    {!structured && course && <div className="mx-4 space-y-2 border-t py-3 text-sm sm:mx-6">
       <h3 className="font-medium">{french ? `Partie ${course.part} sur ${course.total_parts}` : `Part ${course.part} of ${course.total_parts}`}</h3>
       {!!coursePartLinks?.length && <nav aria-label={french ? "Parties précédentes" : "Previous parts"} className="flex flex-wrap gap-3 print:hidden">
         {coursePartLinks.map(({ part, messageId }) => <a className={`${focusClass} underline`} key={part}
@@ -340,7 +369,7 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
       {course.inventory_uncertain && <p className="text-xs text-muted-foreground">{french
         ? "La couverture porte sur les sections identifiées dans le plan du cours."
         : "Coverage applies to the sections identified in the Course Map."}</p>}
-      <details className={disclosureClass} open>
+      {!!course.sections.length && <details className={disclosureClass} open>
         <summary className={`${focusClass} cursor-pointer`}>{french ? "Couverture et sections restantes" : "Coverage and remaining sections"}</summary>
         <ol className="mt-2 list-decimal space-y-1 ps-5">
           {course.sections.map((section) => <li key={section.id} dir="auto">
@@ -348,16 +377,17 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
             {` (p. ${section.start}${section.end === section.start ? "" : `–${section.end}`}) · ${coverageLabels[section.status]}`}
           </li>)}
         </ol>
-      </details>
+      </details>}
       {!course.next_request_id && course.part < course.total_parts && <p className="text-xs text-muted-foreground">
         {french ? "La suite nécessite un index complet du PDF." : "Continuing requires a complete PDF index."}
       </p>}
       {onContinueCourse && course.request_id && course.next_request_id && <Button type="button" size="sm" variant="outline"
-        disabled={disabled} className="print:hidden" onClick={() => onContinueCourse(course.request_id!, course.next_request_id!, continuationLabel)}>
+        disabled={disabled} className="print:hidden"
+        onClick={() => onContinueCourse(course.request_id!, course.next_request_id!, continuationLabel)}>
         {continuationLabel}
       </Button>}
     </div>}
-    {(tasks.length > 0 || collapsible) && <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 print:hidden">
+    {!structured && (tasks.length > 0 || collapsible) && <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 print:hidden">
       {tasks.length > 0 && <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <progress aria-label="Checklist progress" value={completed} max={tasks.length}
           className="h-2 w-20 appearance-none overflow-hidden rounded-full bg-muted [&::-moz-progress-bar]:bg-primary [&::-webkit-progress-bar]:bg-muted [&::-webkit-progress-value]:bg-primary" />
@@ -368,7 +398,7 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
         <Button type="button" size="sm" variant="ghost" aria-controls={`${id}-sections`} onClick={() => setSectionsOpen(false)}>Collapse all</Button>
       </div>}
     </div>}
-    <div className={`px-4 pb-4 sm:px-6 sm:pb-5 print:px-0 ${compact ? "pt-4" : "pt-2"}`}>
+    {!structured && <div className={`px-4 pb-4 sm:px-6 sm:pb-5 print:px-0 ${compact ? "pt-4" : "pt-2"}`}>
       {sections.length > 0 && <div id={`${id}-sections`} className={`min-w-0 ${guideGroups ? "space-y-1.5" : ""}`} ref={sectionList}>
         {guideGroups ? guideGroups.map(({ section, children, phaseLabel }, index) => <div key={section.index}>
           {phaseLabel && <h4 dir="auto" className={supportLabel + " mb-1 bg-muted/45 px-3 py-2"}>{phaseLabel}</h4>}
@@ -400,7 +430,7 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
         </Button>}
       </SupportingMaterial>}
       {!layout.brief && sourceFooter}
-    </div>
+    </div>}
   </article>
 }
 

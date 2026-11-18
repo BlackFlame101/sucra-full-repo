@@ -11,6 +11,14 @@ function load(path, dependencies) {
   })
   const exports = {}
   new Function("exports", "require", outputText)(exports, (name) => {
+    if (name === "@/lib/educational-document") return load("lib/educational-document.ts", {})
+    if (name === "@/lib/documents/pdf-page") return load("lib/documents/pdf-page.ts", {})
+    if (name === "@/lib/notebook/document" && !(name in dependencies)) {
+      return load("lib/notebook/document.ts", { marked })
+    }
+    if (name === "@/lib/notebook/schema" && !(name in dependencies)) {
+      return { validateNoteDocument: () => { throw new Error("Unexpected educational document in a legacy test") } }
+    }
     if (!(name in dependencies)) throw new Error(`Unexpected module: ${name}`)
     return dependencies[name]
   })
@@ -251,6 +259,31 @@ test("PDF citations sign only an owned source and open its exact page", async ()
   assert.equal(response.status, 302)
   assert.equal(response.headers.get("location"), "https://storage.example.test/signed?token=fixture#page=3")
   assert.equal(response.headers.get("cache-control"), "private, no-store")
+})
+
+test("an owned Notebook source reopens its inquiry on the browser's current origin", async () => {
+  const source = { note_id: "note", course_id: "course", session_id: "session", message_id: "response" }
+  let readableMessage = { id: source.message_id }
+  const query = data => ({ select: () => query(data), eq: () => query(data), maybeSingle: async () => ({ data }) })
+  const client = {
+    auth: { getUser: async () => ({ data: { user: { id: "owner" } } }) },
+    from: table => query(table === "messages" ? readableMessage : { id: table }),
+  }
+  const { GET } = load("app/api/notebook/source/[id]/route.ts", {
+    "@/lib/supabase/server": {
+      createClient: async () => client,
+      createServiceClient: async () => ({ from: () => query(source) }),
+    },
+    "@/lib/notebook/schema": { notebookId: /^fixture$/ },
+  })
+  const call = () => GET(new Request("http://localhost:7120/api/notebook/source/fixture"),
+    { params: Promise.resolve({ id: "fixture" }) })
+  const response = await call()
+  assert.equal(response.status, 302)
+  assert.equal(response.headers.get("location"), "/dashboard/course/course/inquiry/session?message=response")
+  assert.equal(response.headers.get("cache-control"), "private, no-store")
+  readableMessage = null
+  assert.equal((await call()).status, 404)
 })
 
 test("password recovery callback accepts only a verified recovery exchange", async () => {

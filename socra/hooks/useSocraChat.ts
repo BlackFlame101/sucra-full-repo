@@ -13,9 +13,10 @@
  *   - `onDiagnostic(d)` — fired exactly once per fresh session
  *   - `onContext(e)`    — fired when the Évaluateur ran for the turn
  */
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react"
 import type { UIMessage } from "ai"
 import { createClient } from "@/lib/supabase/client"
+import { applyExplanationEvent, inquiryExplanationUnits, restoreExplanationTurns, type ExplanationStream, type UnitAction } from "@/lib/explanation-v2"
 import {
   buildChatWsUrl,
   parseServerMessage,
@@ -26,7 +27,7 @@ import {
   type PublicCard,
   type PublicCorrection,
   type PublicExercise,
-  type PublicExplanation,
+  type ExplanationPayload,
   type PublicSolution,
 } from "@/lib/socra-ws"
 
@@ -45,7 +46,7 @@ interface UseSocraChatOpts {
   onDiagnostic?: (d: DiagnosticReport) => void
   onContext?: (e: EvaluationResult) => void
   onExercise?: (e: PublicExercise) => void
-  onExplanation?: (e: PublicExplanation) => void
+  onExplanation?: (e: ExplanationPayload) => void
   onCorrection?: (e: PublicCorrection) => void
   onSolution?: (e: PublicSolution) => void
   onError?: (err: Error) => void
@@ -53,12 +54,15 @@ interface UseSocraChatOpts {
 
 interface UseSocraChatReturn {
   messages: UIMessage[]
+  explanationTurns: ReturnType<typeof restoreExplanationTurns>
+  explanationUnits: ReturnType<typeof inquiryExplanationUnits>
   status: ChatStatus
   progress: string
   connection: string
   stop: () => void
   error: Error | null
   sendMessage: (m: ChatMessageRequest) => void
+  runUnitAction: (from: string, command: UnitAction, label: string) => void
   submitAttempt: (attempt: { exerciseId: string; answer: string; hintsUsed: number }) => void
   revealSolution: (exerciseId: string) => void
   restoreExercise: () => void
@@ -89,6 +93,8 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
   const { sessionId, courseId, recoverInterrupted } = opts
   const recoveryKey = "socra:turn:" + sessionId
   const [messages, setMessages] = useState<UIMessage[]>([])
+  const explanationTurns = useMemo(() => restoreExplanationTurns(messages), [messages])
+  const explanationUnits = useMemo(() => inquiryExplanationUnits(explanationTurns), [explanationTurns])
   const [status, setStatus] = useState<ChatStatus>("ready")
   const [progress, setProgress] = useState("")
   const [connection, setConnection] = useState("Disconnected")
@@ -123,13 +129,16 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     })
   }, [updateDraft])
 
-  const finish = useCallback((partial: boolean, stage = "") => {
+  const finish = useCallback((partial: boolean, stage = "", failed = false) => {
     flush()
     clearTimeout(timeout.current)
     const turn = active.current
-    if (partial && turn) updateDraft(turn, (message) => ({
-      ...message, metadata: { ...(message.metadata as object), partial: true },
-    }))
+    if (partial && turn) updateDraft(turn, (message) => {
+      const metadata = message.metadata as { explanationStream?: ExplanationStream } | undefined
+      return { ...message, metadata: { ...metadata, partial: true,
+        ...(metadata?.explanationStream ? { explanationStream: { ...metadata.explanationStream, interrupted: true, failed } } : {}),
+      } }
+    })
     active.current = null
     retryable.current = partial
     if (!partial && turn) {
@@ -142,7 +151,7 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
 
   const fail = useCallback((cause: unknown) => {
     const failure = cause instanceof Error ? cause : new Error("Could not reach the tutor. Try again.")
-    finish(true)
+    finish(true, "", true)
     setStatus("error")
     setError(failure)
     callbacks.current.onError?.(failure)
@@ -222,6 +231,30 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           return
         }
         const turn = active.current
+        switch (msg.type) {
+          case "prep_status":
+          case "unit_draft":
+          case "unit_checking":
+          case "unit_ready":
+          case "unit_correction": {
+            const activeDraft = turn && turn.id === msg.request_id ? turn.id : undefined
+            if (activeDraft) waitForTurn()
+            setMessages((previous) => {
+              const index = previous.findLastIndex((message) => {
+                const metadata = message.metadata as { request_id?: string } | undefined
+                return message.role === "assistant" &&
+                  (activeDraft ? message.id === activeDraft : metadata?.request_id === msg.request_id)
+              })
+              const message = previous[index]
+              if (!message) return previous
+              const metadata = message.metadata as { explanationStream?: ExplanationStream } | undefined
+              const stream = applyExplanationEvent(metadata?.explanationStream, msg, msg.sequence)
+              return stream === metadata?.explanationStream ? previous
+                : previous.with(index, { ...message, metadata: { ...metadata, explanationStream: stream } })
+            })
+            return
+          }
+        }
         if (!turn || (msg.request_id && msg.request_id !== turn.id)) return
         if (msg.sequence !== undefined) {
           if (msg.sequence <= turn.sequence) return
@@ -243,6 +276,10 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
           }
         }
         switch (msg.type) {
+          case "document_snapshot":
+            attach("explanation", msg.content)
+            setStatus("streaming")
+            break
           case "request_accepted":
             setProgress("Waiting for the tutor.")
             break
@@ -320,15 +357,21 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
       catch { /* The active turn can still be retried in memory. */ }
       const display = turn.display
       setMessages((previous) => {
+        const priorDraft = reuse ? previous.find((message) => message.id === turn.id) : undefined
+        const priorStream = (priorDraft?.metadata as { explanationStream?: ExplanationStream } | undefined)?.explanationStream
+        const savedPrompt = reuse && previous.some((message) => message.role === "user" && message.id !== turn.id + ":user"
+          && (message.metadata as { request_id?: string } | undefined)?.request_id === turn.id)
         const history = reuse ? previous.filter((message) =>
-          message.id !== turn.id && message.id !== turn.id + ":user" &&
-          (message.metadata as { request_id?: string } | undefined)?.request_id !== turn.id
+          message.id !== turn.id && message.id !== turn.id + ":user"
         ) : previous
         const notebookAction = (turn.body.notebook as NotebookContext | undefined)?.action
-        const metadata = notebookAction ? { notebook_action: notebookAction, request_id: turn.id } : undefined
-        return [...history, { ...localMessage(turn.id + ":user", "user", display), metadata },
+        const metadata = { request_id: turn.id, ...(notebookAction ? { notebook_action: notebookAction } : {}),
+          ...(typeof turn.body.fromRequestId === "string" ? { unitActionFrom: turn.body.fromRequestId } : {}) }
+        return [...history, ...(savedPrompt ? [] : [{ ...localMessage(turn.id + ":user", "user", display), metadata }]),
           { ...localMessage(turn.id, "assistant", ""), metadata: turn.body.mode === "explain"
-            ? { ...metadata, explanationPreview: true } : metadata }]
+            ? { ...metadata, explanationPreview: true, ...(priorStream ? { explanationStream: {
+              ...priorStream, interrupted: false, failed: false, preparationSequence: undefined,
+            } } : {}) } : metadata }]
       })
     }
     waitForTurn()
@@ -367,6 +410,16 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     const display = displayText?.trim() ? displayText.trim().slice(0, 500) : message
     startTurn({ message, ...(displayText?.trim() ? { displayText: display } : {}), mode, ...(notebook ? { notebook } : {}),
       ...(continuation ? { continueCourseFrom: continuation.from } : {}) }, display, continuation?.requestId)
+  }, [startTurn])
+
+  const runUnitAction = useCallback((from: string, command: UnitAction, label: string) => {
+    const { action, logical_id, request_id } = command
+    if (command.disabled || !from || !request_id || !logical_id ||
+      (action !== "continue_learning" && action !== "deepen_unit")) return
+    const displayText = label.trim().slice(0, 500)
+    if (!displayText) return
+    startTurn({ action, mode: "explain", fromRequestId: from, displayText,
+      ...(action === "deepen_unit" ? { unitId: logical_id } : {}) }, displayText, request_id)
   }, [startTurn])
 
   const regenerate = useCallback(() => {
@@ -459,6 +512,6 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     return () => clearTimeout(timer)
   }, [recoverInterrupted, recoveryKey])
 
-  return { messages, status, progress, connection, stop, error, sendMessage, submitAttempt, revealSolution,
+  return { messages, explanationTurns, explanationUnits, status, progress, connection, stop, error, sendMessage, runUnitAction, submitAttempt, revealSolution,
     restoreExercise, setMessages, regenerate, canRegenerate, interrupted, disconnect }
 }

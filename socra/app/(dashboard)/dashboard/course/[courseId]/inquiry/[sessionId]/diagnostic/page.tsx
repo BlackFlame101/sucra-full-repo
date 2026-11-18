@@ -35,6 +35,7 @@ import {
 import { toast } from "sonner"
 import { useSocraChat } from "@/hooks/useSocraChat"
 import { TutorMessage } from "@/components/chat/TutorMessage"
+import { LiveExplanation } from "@/components/chat/LiveExplanation"
 
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings/SettingsDialog"
@@ -45,6 +46,7 @@ import {
   type DiagnosticReport,
 } from "@/lib/socra-ws"
 import { useUserSettings } from "@/hooks/useUserSettings"
+import { explanationV2 } from "@/lib/explanation-v2"
 import type { Document, Course } from "@/types"
 import type { LearningMode } from "@/lib/socra-ws"
 
@@ -95,15 +97,22 @@ export default function DiagnosticPage() {
   const [phase, setPhase] = useState<Phase>("picking")
   const [diagnostic, setDiagnostic] = useState<DiagnosticReport | null>(null)
   const [modeResultReady, setModeResultReady] = useState(false)
+  const [explanationStatus, setExplanationStatus] = useState<"empty" | "partial" | "complete">("complete")
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const { getActiveConfig } = useUserSettings()
-  const { messages, status, progress, sendMessage, regenerate, stop, interrupted } = useSocraChat({
+  const { messages, explanationTurns, status, progress, sendMessage, regenerate, stop, interrupted } = useSocraChat({
     sessionId, courseId, language, llmConfig: getActiveConfig(), recoverInterrupted: true,
     onDiagnostic: (report) => { setDiagnostic(report); setPhase("diagnosed") },
     onExercise: () => setModeResultReady(true),
-    onExplanation: () => setModeResultReady(true),
+    onExplanation: (card) => {
+      const units = explanationV2(card)?.units
+      setExplanationStatus(!units ? "complete" : !units.some((unit) => unit.blocks.length) ? "empty"
+        : units.some((unit) => unit.coverage !== "explained" || (unit.lab_verification && unit.review_state !== "approved"))
+          ? "partial" : "complete")
+      setModeResultReady(true)
+    },
     onError: (failure) => {
       const code = (failure as Error & { code?: string }).code
       setApiKeyIssue(code?.startsWith("API_") ? { code, message: failure.message } : null)
@@ -112,6 +121,8 @@ export default function DiagnosticPage() {
     },
   })
   const assistant = messages.findLast((message) => message.role === "assistant")
+  const requestId = (assistant?.metadata as { request_id?: string } | undefined)?.request_id
+  const liveExplanation = learningMode === "explain" && requestId ? explanationTurns.get(requestId) : undefined
   const part = assistant?.parts[0]
   const tutorOpening = part?.type === "text" ? part.text : ""
   const partial = Boolean((assistant?.metadata as { partial?: boolean } | undefined)?.partial)
@@ -337,12 +348,16 @@ export default function DiagnosticPage() {
               {viewPhase === "thinking"
                 ? <span className="flex items-center gap-3"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-secondary" />{progress || "Preparing your request."}</span>
                 : modeResultReady
-                  ? learningMode === "explain" ? "Your explanation is ready. Continue to view it with its course citations." : "Your practice question is ready. Continue to view it."
+                  ? learningMode !== "explain" ? "Your practice question is ready. Continue to view it."
+                    : explanationStatus === "empty" ? "An explanation was not generated. Open the inquiry to see its status."
+                    : explanationStatus === "partial" ? "A partial explanation is available. Open it to see the content and verification status."
+                    : "Your explanation is ready. Continue to view it with its course citations."
                   : "Your selected learning mode is processing your request."}
             </div>
           )}
 
-          {learningMode === "explain" && tutorOpening && !modeResultReady && (
+          {liveExplanation && <LiveExplanation turn={liveExplanation} french={language === "fr"} />}
+          {learningMode === "explain" && !liveExplanation && tutorOpening && !modeResultReady && (
             <TutorMessage content={tutorOpening} isStreaming={status === "streaming"} partial={partial} />
           )}
           <div className="flex items-center justify-between gap-3 pt-2">
@@ -387,6 +402,7 @@ export default function DiagnosticPage() {
               )}
             </div>
           </div>
+          {liveExplanation && <LiveExplanation turn={liveExplanation} french={language === "fr"} />}
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={() => { setPhase("thinking"); regenerate() }}>
               Try again
