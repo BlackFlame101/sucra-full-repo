@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import unicodedata
 from collections import Counter
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from db.supabase_client import get_supabase
+from rag.qcm_inventory import QcmInventory, QcmSourceError, build_qcm_inventory
 
 _MAX_CHUNKS = 500
 _MAX_DOCUMENTS = 256
@@ -27,7 +29,7 @@ async def course_documents(course_id: str, owner_id: str) -> list[dict]:
 
     def read():
         response = (get_supabase().table("documents")
-                    .select("id,filename,page_count,index_chunk_count,content_hash,index_config,courses!inner(user_id)", count="exact")
+                    .select("id,filename,course_id,storage_path,file_size,page_count,index_chunk_count,content_hash,index_config,courses!inner(user_id)", count="exact")
                     .eq("course_id", course_id).eq("courses.user_id", owner_id)
                     .eq("index_status", "ready").order("id").limit(_MAX_DOCUMENTS).execute())
         if response.count != len(response.data or []):
@@ -35,6 +37,26 @@ async def course_documents(course_id: str, owner_id: str) -> list[dict]:
         return response.data or []
 
     return await asyncio.to_thread(read)
+
+
+async def load_qcm_inventory(document: dict, owner_id: str, ordinals: tuple[int, ...]) -> QcmInventory:
+    """Reuse the indexing extractor and verify the bytes against the selected index."""
+    from worker import download_document, extract_pages, InvalidDocument
+
+    source_hash = document.get("content_hash")
+    index_version = document.get("index_config")
+    if not source_hash or not index_version:
+        raise QcmSourceError("La version indexée du PDF est indisponible.")
+    try:
+        data = await download_document(document, owner_id)
+        if hashlib.sha256(data).hexdigest() != source_hash:
+            raise QcmSourceError("Le PDF a changé depuis son indexation.")
+        pages = await extract_pages(data)
+    except InvalidDocument as exc:
+        raise QcmSourceError("Le texte du PDF source n’a pas pu être vérifié.") from exc
+    if len(pages) != document.get("page_count"):
+        raise QcmSourceError("Le nombre de pages diffère de la version indexée.")
+    return build_qcm_inventory(pages, str(document["id"]), source_hash, index_version, ordinals)
 
 
 def _fold(value: str) -> str:

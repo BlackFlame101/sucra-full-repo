@@ -132,7 +132,7 @@ export type PublicCard =
 export type WSServerMessage =
   | { type: "diagnostic"; content: DiagnosticReport }
   | { type: "token"; content: string }
-  | { type: "content_delta"; content: { text: string | null; preview?: boolean } }
+  | { type: "content_delta"; content: { text: string | null; preview?: boolean; qcm?: boolean } }
   | { type: "card_ready"; content: PublicCard }
   | { type: "context_update"; content: EvaluationResult }
   | { type: "connected" | "request_accepted" | "turn_finalized" | "cancelled" }

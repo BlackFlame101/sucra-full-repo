@@ -1,13 +1,34 @@
 import { createHash } from "node:crypto"
+import type { JSONContent } from "@tiptap/react"
 import { NextResponse } from "next/server"
 import { createClient, createServiceClient } from "@/lib/supabase/server"
 import { explanationNoteText } from "@/lib/ai/explanation-note"
-import { markdownNote, noteText, readNoteDocument, selectNoteText } from "@/lib/notebook/document"
+import { markdownNote, noteText, readNoteDocument, selectNoteText, type NoteDocument } from "@/lib/notebook/document"
 import { notebookId, validateNoteDocument } from "@/lib/notebook/schema"
 import type { ExerciseCitation, PublicCorrection, PublicExplanation, SuggestedReadingItem } from "@/lib/socra-ws"
 import type { Json } from "@/types/database"
 
 const fail = (error: string, status: number) => NextResponse.json({ error }, { status })
+
+function qcmPageLinks(doc: NoteDocument): ExerciseCitation[] {
+  const pages = new Map<string, ExerciseCitation>()
+  function visit(node: JSONContent) {
+    for (const mark of node.marks ?? []) {
+      if (mark.type !== "link") continue
+      const match = /^\/api\/documents\/view\/([\da-f-]+)\?page=([1-9]\d*)#page=\2$/i.exec(mark.attrs?.href ?? "")
+      if (!match || !notebookId.test(match[1]) || !Number.isSafeInteger(Number(match[2]))) {
+        throw new Error("Invalid QCM page link.")
+      }
+      const document_id = match[1].toLowerCase()
+      const page_number = Number(match[2])
+      pages.set(`${document_id}:${page_number}`, { document_id, page_number, filename: "Course PDF", excerpt: "" })
+    }
+    node.content?.forEach(visit)
+  }
+  visit(doc)
+  if (!pages.size) throw new Error("Missing QCM page links.")
+  return [...pages.values()]
+}
 
 export async function POST(request: Request) {
   const client = await createClient()
@@ -27,19 +48,32 @@ export async function POST(request: Request) {
   if (!message) return fail("Wait for the response to finish saving, then try again.", 404)
   const metadata = (message.metadata ?? {}) as {
     explanation?: PublicExplanation; correction?: PublicCorrection; exercise?: unknown; exercise_id?: string
+    qcm_status?: "unreviewed" | "partial" | "failed"
     course_context?: { suggested_readings?: SuggestedReadingItem[] }
   }
-  const explanation = metadata.explanation
-  const correction = metadata.correction
-  const kind = explanation ? "explanation" : correction ? "exercise" : "tutor"
+  if (metadata.qcm_status === "failed") return fail("This QCM has no answer to save.", 422)
+  const qcm = metadata.qcm_status === "unreviewed" || metadata.qcm_status === "partial"
+  const explanation = qcm ? undefined : metadata.explanation
+  const correction = qcm ? undefined : metadata.correction
+  const kind = qcm || explanation ? "explanation" : correction ? "exercise" : "tutor"
   if (metadata.exercise && !correction) return fail("Save the feedback after answering the exercise.", 400)
   let content = message.content
+  let doc: NoteDocument | undefined
   const explanationCitations = explanation && [
     ...(explanation.citations ?? []), ...(explanation.sections ?? []).flatMap((section) => section.citations ?? []),
   ]
   let citations: ExerciseCitation[] = explanationCitations ?? correction?.citations ??
     (metadata.course_context?.suggested_readings ?? []).flatMap((reading) => reading.document_id
       ? [{ ...reading, document_id: reading.document_id, filename: reading.filename ?? "Course PDF" }] : [])
+  if (qcm) {
+    // The persisted Markdown is the same final answer displayed in chat.
+    try {
+      doc = validateNoteDocument(markdownNote(message.content))
+      citations = qcmPageLinks(doc)
+    } catch {
+      return fail("This QCM could not be converted into a note with its source pages.", 422)
+    }
+  }
   const service = await createServiceClient()
   if (correction) {
     content = ["## Feedback", correction.overall_feedback,
@@ -73,6 +107,7 @@ export async function POST(request: Request) {
     citation.document_id + ":" + citation.page_number, citation,
   ])).values()]
   if (citations.length) {
+    const expected = citations.length
     const { data: documents, error } = await client.from("documents").select("id,filename,page_count")
       .eq("course_id", body.course_id).in("id", [...new Set(citations.map((citation) => citation.document_id))])
     if (error) return fail("Could not verify the PDF citations.", 503)
@@ -81,6 +116,7 @@ export async function POST(request: Request) {
       return doc && Number.isInteger(citation.page_number) && citation.page_number! > 0 &&
         (!doc.page_count || citation.page_number! <= doc.page_count) ? [{ ...citation, filename: doc.filename }] : []
     })
+    if (qcm && citations.length !== expected) return fail("A QCM source page is unavailable in this course.", 422)
   }
 
   if (explanation) {
@@ -96,8 +132,7 @@ export async function POST(request: Request) {
       sections: explanation.sections?.map((section) => ({ ...section, citations: verify(section.citations) })),
     })
   }
-  let doc
-  try { doc = validateNoteDocument(markdownNote(content)) }
+  try { doc ??= validateNoteDocument(markdownNote(content)) }
   catch { return fail("This response could not be converted into a note.", 422) }
   const selection = body.selection?.replace(/\s+/g, " ").trim()
   const nodes = selection ? selectNoteText(doc, selection) : doc.content

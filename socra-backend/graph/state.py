@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Literal, TypedDict
 
+from rag.qcm_inventory import QcmInventory
+
 
 # ---------------------------------------------------------------------------
 # Agent outputs
@@ -97,6 +99,10 @@ class SocraState(TypedDict, total=False):
     notebook_context: dict[str, Any]
     notebook_action: str
     notebook_result: str
+    qcm_inventory: QcmInventory
+    qcm_result: str
+    qcm_status: Literal["unreviewed", "partial", "failed"]
+    qcm_preview: Callable[[str], Awaitable[None]]
     preview: Callable[[str | None], Awaitable[None]]
     tutor_delta: Callable[[str], Awaitable[None]]
     emit_diagnostic: Callable[[DiagnosticReport], Awaitable[None]]

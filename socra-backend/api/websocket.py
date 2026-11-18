@@ -540,12 +540,12 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             if note_action == "quiz":
                 initial_state["requested_exercise_type"] = "short_answer"
 
-        async def delta(text: str | None, *, preview: bool = False) -> None:
+        async def delta(text: str | None, *, preview: bool = False, qcm: bool = False) -> None:
             nonlocal first_text_sent
             if text and not first_text_sent:
                 first_text_sent = True
                 timing("first_text", turn_started)
-            await emit("content_delta", {"text": text, "preview": preview})
+            await emit("content_delta", {"text": text, "preview": preview, **({"qcm": True} if qcm else {})})
 
         saved: dict[str, Any] = {}
 
@@ -568,6 +568,7 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
 
         if protocol == 2:
             initial_state["preview"] = lambda text: delta(text, preview=True)
+            initial_state["qcm_preview"] = lambda text: delta(text, preview=True, qcm=True)
         initial_state["tutor_delta"] = delta
         initial_state["emit_diagnostic"] = lambda report: emit("diagnostic", report)
         if stored_diagnostic and not has_answer and requested_mode == "socratic":
@@ -672,6 +673,9 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 text = f"You scored {correction['total_score']} out of {correction['max_score']}. Review your feedback below."
             elif final_state.get("notebook_result"):
                 text = final_state["notebook_result"]
+            elif final_state.get("qcm_result"):
+                text = final_state["qcm_result"]
+                metadata["qcm_status"] = final_state["qcm_status"]
             else:
                 await emit("error", "The tutor returned an empty response. Try again.")
                 return

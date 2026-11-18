@@ -105,8 +105,16 @@ export function ChatPanel({
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const didInitialScrollRef = useRef(false)
   const isNearBottomRef = useRef(true)
+  const openedExplanationRef = useRef<string | null>(null)
   const captureSelection = useRef("")
   const [showScrollToBottom, setShowScrollToBottom] = useState(false)
+  const latestAssistant = messages.findLast((message) => message.role === "assistant")
+  const latestMetadata = latestAssistant?.metadata as {
+    qcmPreview?: boolean; qcm_status?: string; request_id?: string
+  } | undefined
+  const latestQcmId = (latestMetadata?.qcmPreview || (latestMetadata?.qcm_status && latestMetadata.qcm_status !== "failed"))
+    && latestAssistant?.parts.some((part) => part.type === "text" && part.text) ? latestAssistant.id : undefined
+  const latestQcmKey = latestQcmId && (latestMetadata?.request_id || latestQcmId)
   const activeExerciseIsInHistory = !messagesLoading && exercise && messages.some((message) => {
     const metadata = (message as UIMessage & { metadata?: Record<string, unknown> }).metadata
     return (metadata?.exercise as PublicExercise | undefined)?.id === exercise.id
@@ -129,7 +137,7 @@ export function ChatPanel({
     updateScrollButton()
     viewport.addEventListener("scroll", updateScrollButton, { passive: true })
     const resizeObserver = new ResizeObserver(() => {
-      if (didInitialScrollRef.current && isNearBottomRef.current) viewport.scrollTop = viewport.scrollHeight
+      if (!latestQcmId && didInitialScrollRef.current && isNearBottomRef.current) viewport.scrollTop = viewport.scrollHeight
       updateScrollButton()
     })
     resizeObserver.observe(viewport)
@@ -138,7 +146,15 @@ export function ChatPanel({
       viewport.removeEventListener("scroll", updateScrollButton)
       resizeObserver.disconnect()
     }
-  }, [messagesLoading])
+  }, [messagesLoading, latestQcmId])
+
+  const openLatestExplanation = () => {
+    const viewport = scrollAreaRef.current
+    const target = latestQcmId && document.getElementById(`message-${latestQcmId}`)
+    if (!viewport || !target) return
+    viewport.focus({ preventScroll: true })
+    viewport.scrollTop += target.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+  }
 
   const scrollToBottom = () => {
     const viewport = scrollAreaRef.current
@@ -152,19 +168,23 @@ export function ChatPanel({
   useLayoutEffect(() => {
     if (messagesLoading) {
       didInitialScrollRef.current = false
+      openedExplanationRef.current = null
       return
     }
-    if (didInitialScrollRef.current && !isNearBottomRef.current) return
+    if (latestQcmKey && openedExplanationRef.current === latestQcmKey) return
+    if (!latestQcmKey && didInitialScrollRef.current && !isNearBottomRef.current) return
 
     const frame = requestAnimationFrame(() => {
       const viewport = scrollAreaRef.current
       if (!viewport) return
-      if (!didInitialScrollRef.current && sourceMessageId) {
-        const source = document.getElementById(`message-${sourceMessageId}`)
+      const targetId = (!didInitialScrollRef.current && sourceMessageId) || latestQcmId
+      if (targetId) {
+        const source = document.getElementById(`message-${targetId}`)
         if (source) {
           viewport.scrollTop += source.getBoundingClientRect().top - viewport.getBoundingClientRect().top
           didInitialScrollRef.current = true
           isNearBottomRef.current = false
+          if (latestQcmKey) openedExplanationRef.current = latestQcmKey
           return
         }
       }
@@ -173,7 +193,7 @@ export function ChatPanel({
       isNearBottomRef.current = true
     })
     return () => cancelAnimationFrame(frame)
-  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation?.check_question, sourceMessageId])
+  }, [messagesLoading, messages, status, exercise?.id, correction?.attempt_id, explanation?.check_question, sourceMessageId, latestQcmId, latestQcmKey])
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -191,6 +211,8 @@ export function ChatPanel({
           </Badge>
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 xl:shrink-0 xl:justify-end">
+          {latestQcmId && <Button type="button" variant="outline" size="sm" aria-controls={scrollAreaId}
+            onClick={openLatestExplanation}>View explanation</Button>}
           <Select value={language} onValueChange={(value) => onLanguageChange(value as "fr" | "en")}>
             <SelectTrigger className="w-28 max-w-full" aria-label="Response language"><SelectValue /></SelectTrigger>
             <SelectContent><SelectItem value="fr">Français</SelectItem><SelectItem value="en">English</SelectItem></SelectContent>

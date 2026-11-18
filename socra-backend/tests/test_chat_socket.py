@@ -80,6 +80,50 @@ class SocketTests(unittest.TestCase):
         self.assertFalse(self.rows)
         self.quota.assert_awaited_once_with("owner", "explain")
 
+    def test_partial_qcm_markdown_is_persisted_and_replayed(self):
+        text = "## Q1 · [PDF, p. 1](/api/documents/view/fixture?page=1#page=1)\n\nQ2 reste sans réponse."
+
+        async def qcm(state):
+            await state["progress"]("Préparation du lot 1/4.")
+            await state["qcm_preview"]("## Q1\n\n")
+            return {**state, "qcm_result": text, "qcm_status": "partial"}
+
+        with patch("graph.nodes.run_explicateur", AsyncMock(side_effect=qcm)) as explain:
+            ws = self.connect()
+            request = self.send(ws, mode="explain", message="Résous Q1 à Q5 du QCM.")
+            first = self.until(ws, "done")
+            self.send(ws, mode="explain", request=request, message="Résous Q1 à Q5 du QCM.")
+            replay = self.until(ws, "done")
+        saved = self.rows[("assistant", request)]
+        self.assertEqual(saved["metadata"]["qcm_status"], "partial")
+        self.assertEqual(saved["content"], text)
+        preview = next(event for event in first if event["type"] == "content_delta")
+        self.assertEqual(preview["content"], {"text": "## Q1\n\n", "preview": True, "qcm": True})
+        self.assertTrue(any(event["type"] == "progress" and event["content"]["stage"] == "Préparation du lot 1/4." for event in first))
+        self.assertFalse(any(event["type"] == "content_delta" for event in replay))
+        for events in (first, replay):
+            completed = next(event for event in events if event["type"] == "response_complete")
+            self.assertEqual(completed["content"], {"message_id": saved["id"], "text": text})
+            self.assertFalse(any(event["type"] == "card_ready" for event in events))
+        explain.assert_awaited_once()
+
+    def test_qcm_provider_failure_replays_without_rerunning_generation(self):
+        text = "Gemini est temporairement indisponible."
+        with patch("graph.nodes.run_explicateur", AsyncMock(side_effect=lambda state: {
+            **state, "qcm_result": text, "qcm_status": "failed",
+        })) as explain:
+            ws = self.connect()
+            request = self.send(ws, mode="explain", message="Résous les 20 questions du QCM.")
+            first = self.until(ws, "done")
+            self.send(ws, mode="explain", request=request, message="Résous les 20 questions du QCM.")
+            replay = self.until(ws, "done")
+        saved = self.rows[("assistant", request)]
+        self.assertEqual(saved["metadata"]["qcm_status"], "failed")
+        for events in (first, replay):
+            completed = next(event for event in events if event["type"] == "response_complete")
+            self.assertEqual(completed["content"], {"message_id": saved["id"], "text": text})
+        explain.assert_awaited_once()
+
     def test_notebook_chat_streams_and_replays_without_reloading_changed_selection(self):
         note_id = str(uuid4())
         note = {"id": note_id, "title": "Models", "excerpt": "A simplified representation.", "course_id": None}

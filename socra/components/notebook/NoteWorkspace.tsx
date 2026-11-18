@@ -1,16 +1,23 @@
 "use client"
 
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react"
-import { MoreHorizontal, Star, Trash2, X } from "lucide-react"
+import { Download, MoreHorizontal, Star, Trash2, X } from "lucide-react"
+import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { NoteEditor, type EditorHandle, type SelectionRequest, type Spelling } from "./NoteEditor"
 import { notebookDraftKey, useNotebookAutosave } from "@/hooks/useNotebookAutosave"
 import { readNoteDocument } from "@/lib/notebook/document"
+import { notebookPdfFilename } from "@/lib/notebook/pdf-filename"
 import type { Note, NoteCourse, NoteDraft } from "@/lib/notebook/notes"
 
 export type NoteWorkspaceHandle = EditorHandle & { leave: () => Promise<boolean>; save: () => Promise<boolean> }
+
+type PdfSavePicker = (options: {
+  suggestedName: string
+  types: { description: string; accept: { "application/pdf": string[] } }[]
+}) => Promise<FileSystemFileHandle>
 
 function fromNote(note: Note): NoteDraft {
   return { title: note.title, topic: note.topic, course_id: note.course_id, tags: note.tags ?? [], starred: note.starred ?? false,
@@ -33,6 +40,7 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
   const [spelling, setSpelling] = useState<Spelling>("auto")
   const [editorRevision, setEditorRevision] = useState(0)
   const [initialized, setInitialized] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const draft = useRef(initial)
   const restored = useRef(false)
   const editorHandle = useRef<EditorHandle>(null)
@@ -75,6 +83,47 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
   const updateContent = useCallback((content_json: NoteDraft["content_json"]) => update({ content_json }), [update])
   const save = useCallback(() => { void flush() }, [flush])
 
+  async function savePdf() {
+    const filename = notebookPdfFilename(draft.current.title)
+    const picker = (window as Window & { showSaveFilePicker?: PdfSavePicker }).showSaveFilePicker
+    setExporting(true)
+    try {
+      const handle = picker ? await picker.call(window, {
+        suggestedName: filename,
+        types: [{ description: "PDF document", accept: { "application/pdf": [".pdf"] } }],
+      }) : null
+      if (!await flush()) throw new Error("Save your note before exporting it.")
+      const response = await fetch(`/api/notebook/${encodeURIComponent(note.id)}/pdf`)
+      if (!response.ok) throw new Error(await response.text())
+      const blob = await response.blob()
+      if (handle) {
+        const writable = await handle.createWritable()
+        try {
+          await writable.write(blob)
+          await writable.close()
+        } catch (error) {
+          await writable.abort().catch(() => {})
+          throw error
+        }
+      } else {
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement("a")
+        link.href = url
+        link.download = filename
+        document.body.append(link)
+        link.click()
+        link.remove()
+        window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+      }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) {
+        toast.error(error instanceof Error ? error.message : "Could not save this PDF.")
+      }
+    } finally {
+      setExporting(false)
+    }
+  }
+
   function addTag() {
     const value = tag.trim()
     if (!value || details.tags.length >= 20 || details.tags.some((item) => item.toLocaleLowerCase() === value.toLocaleLowerCase())) return
@@ -107,6 +156,9 @@ export function NoteWorkspace({ note, courses, onSaved, onDelete, onAsk, onSelec
             <DropdownMenuItem onSelect={onAsk}>Ask Socra</DropdownMenuItem>
             <DropdownMenuItem disabled={!initialized} onSelect={() => update({ starred: !details.starred })}><Star />{details.starred ? "Unstar note" : "Star note"}</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void flush()}>Save now</DropdownMenuItem>
+            <DropdownMenuItem disabled={!initialized || exporting} onSelect={() => void savePdf()}>
+              <Download />{exporting ? "Saving PDF…" : "Save as PDF"}
+            </DropdownMenuItem>
             {(["auto", "en", "fr", "off"] as const).map((option) =>
               <DropdownMenuItem key={option} role="menuitemradio" aria-checked={spelling === option} onSelect={() => {
                 setSpelling(option)

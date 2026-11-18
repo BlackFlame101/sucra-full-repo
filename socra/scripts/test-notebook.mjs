@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import test from "node:test"
 import ts from "typescript"
+import { getDocumentProxy } from "unpdf"
 
 const require = createRequire(import.meta.url)
 function load(path, dependencies = {}) {
@@ -167,6 +168,9 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   let saved
   let correction
   let explanation
+  let qcmStatus
+  let qcmMarkdown
+  let pageCount = 4
   let revealed = false
   let answerReads = 0
   const client = { auth: { getUser: async () => ({ data: { user: { id: "owner" } } }) }, from: (table) => {
@@ -175,12 +179,13 @@ test("capture uses persisted messages and preserves formatting in a selected exc
       assert.deepEqual([key, value], ["course_id", course])
       return { in: async (_column, ids) => {
         assert.ok(ids.includes(id))
-        return { data: [{ id, filename: "Course.pdf", page_count: 4 }] }
+        return { data: [{ id, filename: "Course.pdf", page_count: pageCount }] }
       } }
     } }) }
     assert.equal(table, "messages")
     return query((fields) => fields.role === "assistant" && fields.session_id === session
-      ? { content: "The **verified phrase** is useful.", metadata: explanation ? { explanation } : correction ? { correction, exercise_id: id } : {} } : null)
+      ? { content: qcmMarkdown ?? "The **verified phrase** is useful.",
+          metadata: qcmStatus ? { qcm_status: qcmStatus } : explanation ? { explanation } : correction ? { correction, exercise_id: id } : {} } : null)
   } }
   const { POST } = load("app/api/notebook/capture/route.ts", {
     "next/server": { NextResponse: Response },
@@ -241,4 +246,96 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   assert.match(note, /[?]page=4#page=4/)
   assert.match(note, /Ask to continue with step 3/)
   assert.doesNotMatch(note, /Out of bounds|Other course|[?]page=5/)
+
+  qcmStatus = "unreviewed"
+  qcmMarkdown = [
+    "# Corrigé proposé · Q1 à Q20", "Réponses du modèle sans corrigé officiel.",
+    ...Array.from({ length: 20 }, (_, index) => {
+      const number = index + 1
+      const page = number <= 5 ? 1 : number <= 11 ? 2 : number <= 17 ? 3 : 4
+      return [
+        `## Q${number} · [PDF, p. ${page}](/api/documents/view/${id}?page=${page}#page=${page})`,
+        `Question originale ${number} sur les compétences ?`,
+        [..."ABCD"].map((key) => `- ${key === "A" ? "✓" : "✗"} **${key}. Option ${number}-${key}.**  \n  **Principe** · Développement des compétences.  \n  **Application** · Ce choix s’applique à ${number}-${key}.`).join("\n"),
+        "**Choix proposés** · A",
+      ].join("\n\n")
+    }),
+  ].join("\n\n")
+  assert.ok(qcmMarkdown.length > 3_000)
+  assert.equal((await save(null)).status, 200)
+  assert.equal(saved.source_kind, "explanation")
+  assert.deepEqual(saved.source_citations.map((citation) => citation.page_number), [1, 2, 3, 4])
+  assert.equal(saved.body_nodes.filter((node) => node.type === "heading").length, 21)
+  assert.equal(saved.body_nodes.filter((node) => node.type === "bulletList").length, 20)
+  assert.equal((saved.body_text.match(/Principe/g) ?? []).length, 80)
+  assert.equal((saved.body_text.match(/Application/g) ?? []).length, 80)
+  assert.equal((saved.body_text.match(/Choix proposés/g) ?? []).length, 20)
+  assert.equal((saved.body_text.match(/✓/g) ?? []).length, 20)
+  assert.equal((saved.body_text.match(/✗/g) ?? []).length, 60)
+  assert.match(saved.body_text, /Option 20-D\..*\n[\s\S]*20-D\./)
+  assert.doesNotMatch(saved.body_text, /Client forgery|Screenshot checkpoint/)
+  assert.equal(answerReads, 1)
+  const savedQcm = saved
+  pageCount = 3
+  assert.equal((await save(null)).status, 422)
+  assert.equal(saved, savedQcm)
+  qcmStatus = "failed"
+  assert.equal((await save(null)).status, 422)
+
+  const native = { type: "doc", content: structuredClone(savedQcm.body_nodes) }
+  const { editableNote } = load("lib/server/notebook.ts", {
+    "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
+  })
+  native.content.push({ type: "paragraph", content: [{ type: "text", text: "Ma révision : <script> & vérifiée." }] })
+  const fields = editableNote({ title: "Corrigé & révision", content_json: native })
+  const persisted = JSON.parse(JSON.stringify({ ...fields, source_type: "explanation" }))
+  assert.equal(JSON.stringify(document.readNoteDocument(persisted.content_json, "obsolete legacy text")), JSON.stringify(fields.content_json))
+
+  let requester = "owner"
+  const pdfFilename = load("lib/notebook/pdf-filename.ts")
+  assert.equal(pdfFilename.notebookPdfFilename("Corrigé & révision"), "Corrigé & révision.pdf")
+  assert.equal(pdfFilename.notebookPdfFilename("QCM : Q1/Q20.pdf"), "QCM - Q1-Q20.pdf")
+  const { GET } = load("app/api/notebook/[id]/pdf/route.ts", {
+    "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
+    "@/lib/notebook/pdf": load("lib/notebook/pdf.ts", { "./document": document }),
+    "@/lib/notebook/pdf-filename": pdfFilename,
+    "@/lib/supabase/server": { createClient: async () => ({
+      auth: { getUser: async () => ({ data: { user: requester ? { id: requester } : null } }) },
+      from: (table) => {
+        assert.equal(table, "notebook_notes")
+        return query((constraints) => constraints.id === id && constraints.user_id === "owner" ? persisted : null)
+      },
+    }) },
+  })
+  const download = () => GET(new Request(`https://socra.test/api/notebook/${id}/pdf`), { params: Promise.resolve({ id }) })
+  const response = await download()
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store")
+  assert.equal(response.headers.get("Content-Type"), "application/pdf")
+  assert.match(response.headers.get("Content-Disposition"), /Corrig%C3%A9%20%26%20r%C3%A9vision\.pdf/)
+  const pdf = await getDocumentProxy(new Uint8Array(await response.arrayBuffer()), { isEvalSupported: false })
+  try {
+    const text = []
+    const links = []
+    for (let index = 1; index <= pdf.numPages; index++) {
+      const page = await pdf.getPage(index)
+      const words = (await page.getTextContent()).items.map((item) => item.str || "").join(" ")
+      text.push(words)
+      links.push(...(await page.getAnnotations()).map((annotation) => annotation.url))
+      assert.ok(words.includes(`${index} / ${pdf.numPages}`))
+    }
+    const content = text.join(" ")
+    assert.equal((content.match(/Question originale/g) ?? []).length, 20)
+    assert.equal((content.match(/Principe/g) ?? []).length, 80)
+    assert.equal((content.match(/Application/g) ?? []).length, 80)
+    assert.equal((content.match(/✓/g) ?? []).length, 20)
+    assert.equal((content.match(/✗/g) ?? []).length, 60)
+    assert.match(content, /Ma révision : <script> & vérifiée\./)
+    assert.ok(links.includes(`https://socra.test/api/documents/view/${id}?page=4#page=4`))
+    assert.doesNotMatch(content, /obsolete legacy text/)
+  } finally { await pdf.destroy() }
+  requester = "other"
+  assert.equal((await download()).status, 404)
+  requester = null
+  assert.equal((await download()).status, 401)
 })

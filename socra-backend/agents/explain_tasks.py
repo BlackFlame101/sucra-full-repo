@@ -6,6 +6,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from rag.qcm_inventory import ALL_QUESTIONS, FIRST_FIVE
+
 
 def _fold(text: str) -> str:
     return "".join(char for char in unicodedata.normalize("NFKD", text.casefold())
@@ -55,6 +57,22 @@ _SOLVE = (
     + _EXERCISE + r"\b"
 )
 _GRADED_SOLVE = r"\b(?:answer|solve|reponds?|repondre|حل)\s+(?:(?:all|each|the|aux|a|les|toutes les|كل)\s+)*(?:questions?|الاسئلة|السوال)\b"
+_QCM = re.compile(r"\b(?:qcm|quiz a choix multiples|multiple[ -]choice)\b")
+_QCM_SOLVE = re.compile(
+    r"\b(?:solve|answer|give (?:me )?the answers|resous|corrige|reponds?|"
+    r"donne (?:moi )?les reponses)\b"
+)
+_QCM_FIRST_FIVE = re.compile(
+    r"\b(?:(?:the )?first (?:five|5) (?:qcm |multiple[ -]choice )?questions?|"
+    r"(?:les )?(?:cinq|5) premieres questions?)\b"
+)
+_QCM_RANGE = re.compile(
+    r"\b(?:q\s*|questions?\s+)(\d+)\s*(?:[-–—]|a|to)\s*q?\s*(\d+)\b"
+)
+_QCM_ALL = re.compile(
+    r"\b(?:(?:20|twenty|vingt) (?:qcm |multiple[ -]choice )?questions?|"
+    r"(?:all|every|each|toutes|tous) (?:the |les |single )?(?:qcm |multiple[ -]choice )?questions?)\b"
+)
 _NEGATED = r"\b(?:do not|don['’]t|please don't|never|without|ne pas|sans|لا|بدون)\s*$"
 _BREADTH = r"\b(?:everything|all|every|each|complete|entire|full|exhaustive|tout|toutes?|tous|chaque|complet(?:e|ement)?|integral|كل|جميع|كامل|بالكامل)\b"
 _PROCEDURE = r"\b(?:tp|lab(?:oratory)?|practical(?: work)?|travaux pratiques|steps?|etapes?|install(?:ation|er)?s?|commands?|commandes?|screenshots?|screen shots?|captures?(?: d['’]ecran)?|workflows?|خطوات|الخطوات|تثبيت|التثبيت|اوامر|لقطات الشاشة|اعمال تطبيقية)\b"
@@ -105,6 +123,33 @@ def _language(text: str, configured: str | None, explicit_setting: bool) -> str:
     if english > french:
         return "English"
     return fallback or "English"
+
+
+def is_qcm_solve_request(message: str) -> bool:
+    text = _fold(message)
+    return bool(_QCM.search(text) and not _has(_GUIDANCE, text) and any(
+        not _has(_NEGATED, text[:match.start()]) for match in _QCM_SOLVE.finditer(text)
+    ))
+
+
+def requested_qcm_ordinals(message: str) -> tuple[int, ...]:
+    text = _fold(message)
+    if _has(r"\b(?:except|exclude|excluding|skip|omit|sauf|hors|exclure|omets)\b", text):
+        return ()
+    scope = _QCM_RANGE.search(text) or _QCM_FIRST_FIVE.search(text)
+    if scope:
+        remaining = text[:scope.start()] + " " + text[scope.end():]
+        if _QCM_ALL.search(remaining) or _has(r"\b(?:q\s*\d+|questions?\s+\d+|\d+\s+questions?)\b", remaining):
+            return ()
+        if not scope.groups():
+            return FIRST_FIVE
+        first, last = map(int, scope.groups())
+        return tuple(range(first, last + 1)) if 1 <= first <= last <= ALL_QUESTIONS[-1] else ()
+    if _QCM_ALL.search(text) and not _has(r"\b(?:q\s*\d+|questions?\s+\d+)\b", text):
+        remainder = _QCM_ALL.sub("", text)
+        if not _has(r"\b\d+\s+(?:qcm )?questions?\b", remainder):
+            return ALL_QUESTIONS
+    return ()
 
 
 def classify_explain_task(

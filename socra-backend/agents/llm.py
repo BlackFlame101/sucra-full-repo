@@ -154,6 +154,7 @@ def get_chat_llm(
     single_attempt: bool = False,
     agent: str = "unknown",
     request_id: str | None = None,
+    google_transport: httpx.BaseTransport | None = None,
 ) -> Any:
     """Return the configured chat model (Gemini by default, or Groq).
 
@@ -265,7 +266,8 @@ def get_chat_llm(
     if chosen_provider != "google":
         raise ValueError(f"Unsupported chat provider: {chosen_provider}")
 
-    if chosen_key is None and chosen_model is None and max_completion_tokens is None and response_schema is None:
+    if (chosen_key is None and chosen_model is None and max_completion_tokens is None
+            and response_schema is None and google_transport is None):
         return monitor(_cached_default_llm(temperature, streaming, max_retries), resolve_google_model(get_settings().chat_model))
 
     settings = get_settings()
@@ -278,6 +280,7 @@ def get_chat_llm(
         streaming=streaming,
         max_retries=max_retries,
         timeout=45.0,
+        **({"client_args": {"transport": google_transport, "follow_redirects": False}} if google_transport else {}),
     )
     if streaming and response_schema:
         google_model = google_model.bind(response_mime_type="application/json", response_json_schema=response_schema)

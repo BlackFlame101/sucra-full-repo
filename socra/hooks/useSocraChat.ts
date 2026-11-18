@@ -256,6 +256,11 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
               flush()
               updateDraft(turn, (message) => ({ ...message, parts: [{ type: "text", text: "" }] }))
             } else if (text) {
+              if (msg.type === "content_delta" && msg.content.qcm) {
+                updateDraft(turn, (message) => ({
+                  ...message, metadata: { ...(message.metadata as object), qcmPreview: true },
+                }))
+              }
               buffer.current += text
               if (!frame.current) frame.current = requestAnimationFrame(flush)
               setStatus("streaming")

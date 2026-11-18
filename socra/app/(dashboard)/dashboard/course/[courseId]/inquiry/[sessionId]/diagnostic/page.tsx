@@ -114,7 +114,8 @@ export default function DiagnosticPage() {
   const assistant = messages.findLast((message) => message.role === "assistant")
   const part = assistant?.parts[0]
   const tutorOpening = part?.type === "text" ? part.text : ""
-  const partial = Boolean((assistant?.metadata as { partial?: boolean } | undefined)?.partial)
+  const assistantMetadata = assistant?.metadata as { partial?: boolean; qcmPreview?: boolean; qcm_status?: string } | undefined
+  const partial = Boolean(assistantMetadata?.partial)
   const viewPhase = (phase === "thinking" || phase === "diagnosed") && status === "ready" &&
     (modeResultReady || Boolean(tutorOpening && !partial)) ? "ready" : phase
 
@@ -206,7 +207,8 @@ export default function DiagnosticPage() {
   }
 
   const handleContinue = () => {
-    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}`)
+    const message = learningMode === "explain" && assistant ? `&message=${encodeURIComponent(assistant.id)}` : ""
+    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}${message}`)
   }
 
   const handleStartOver = () => {
@@ -336,16 +338,13 @@ export default function DiagnosticPage() {
             <div role={viewPhase === "thinking" ? "status" : undefined} aria-live={viewPhase === "thinking" ? "polite" : undefined} className="rounded-xl border border-border/40 bg-card/30 p-5 text-sm text-muted-foreground">
               {viewPhase === "thinking"
                 ? <span className="flex items-center gap-3"><Loader2 className="h-4 w-4 shrink-0 animate-spin text-secondary" />{progress || "Preparing your request."}</span>
-                : modeResultReady
+                : modeResultReady || (learningMode === "explain" && tutorOpening)
                   ? learningMode === "explain" ? "Your explanation is ready. Continue to view it with its course citations." : "Your practice question is ready. Continue to view it."
                   : "Your selected learning mode is processing your request."}
             </div>
           )}
 
-          {learningMode === "explain" && tutorOpening && !modeResultReady && (
-            <TutorMessage content={tutorOpening} isStreaming={status === "streaming"} partial={partial} />
-          )}
-          <div className="flex items-center justify-between gap-3 pt-2">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
             <Button variant="ghost" size="sm" onClick={viewPhase === "ready" ? handleStartOver : stop}>
               {viewPhase === "ready" ? "Start over" : "Stop"}
             </Button>
@@ -358,6 +357,10 @@ export default function DiagnosticPage() {
               <ArrowRight className="h-4 w-4" />
             </Button>
           </div>
+          {learningMode === "explain" && tutorOpening && !modeResultReady && (
+            <TutorMessage content={tutorOpening} isStreaming={status === "streaming"} partial={partial}
+              explanationPreview={Boolean(assistantMetadata?.qcmPreview || assistantMetadata?.qcm_status)} />
+          )}
         </div>
       )}
 

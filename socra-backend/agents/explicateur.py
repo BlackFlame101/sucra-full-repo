@@ -24,15 +24,22 @@ from agents.metrics import structured_failure
 from agents.explanation_preview import explanation_preview
 from agents.explain_budget import ExplainBudget, explain_budget
 from agents.explain_coverage import evaluate_coverage, missing_requirements, relevant_requirements, requirement_label
-from agents.explain_tasks import ExplainTask, classify_explain_task, explain_flag, is_brief_request, task_prompt, task_repair
+from agents.explain_tasks import (
+    ExplainTask, classify_explain_task, explain_flag, is_brief_request,
+    is_qcm_solve_request, requested_qcm_ordinals, task_prompt, task_repair,
+)
 from agents.explain_intent import adaptive_prompt, classify_intent
 from agents.explain_course import assess_part, part_progress, plan_course
 from agents.llm import get_chat_llm, is_transient_provider_error, provider_error_code, visible_text
+from agents.qcm_generation import generate_qcm
 from agents.structured_output import parse_json_object, recover_json_prefix
 from graph.state import SocraState
 from models.schemas import ExplanationCitation, ExplanationSection, GeneratedExplanation
 from rag.document_inventory import build_inventory
-from rag.explain_documents import course_documents, document_inventory_chunks, requests_whole_document, select_document
+from rag.explain_documents import (
+    course_documents, document_inventory_chunks, load_qcm_inventory, requests_whole_document, select_document,
+)
+from rag.qcm_inventory import QcmSourceError
 from rag.retriever import get_current_course_sections, retrieve_chunks, retrieve_summary_guided_chunks
 
 logger = logging.getLogger(__name__)
@@ -1136,9 +1143,10 @@ async def run_explicateur(state: SocraState) -> SocraState:
     try:
         result = await _run_explicateur(state, metrics)
         incomplete = any(metrics.retrieval.get(key) for key in (
-            "omitted_target_count", "missing_required_evidence", "evidence_limited", "coverage_missing",
+            "omitted_target_count", "missing_required_evidence", "evidence_limited", "coverage_missing", "qcm_source_gap",
         ))
-        outcome = "incomplete" if metrics.truncated or incomplete else "ok"
+        outcome = ("failed" if result.get("qcm_status") == "failed"
+                   else "incomplete" if metrics.truncated or incomplete or result.get("qcm_status") == "partial" else "ok")
         return result
     except asyncio.CancelledError:
         outcome = "cancelled"
@@ -1147,11 +1155,58 @@ async def run_explicateur(state: SocraState) -> SocraState:
         metrics.log(outcome)
 
 
+async def _solve_qcm(state: SocraState, topic: str, metrics: _ExplainMetrics, deadline: float) -> SocraState:
+    result = {**state, "current_node": "explicateur", "qcm_status": "failed"}
+    metrics.retrieval.update(intent="solve", document_kind="qcm", educational_language="French")
+    ordinals = requested_qcm_ordinals(topic)
+    if not ordinals:
+        metrics.retrieval["qcm_source_gap"] = True
+        return {**result, "qcm_result": "Demandez les 20 questions du QCM ou précisez une plage entre Q1 et Q20."}
+
+    documents = await course_documents(state["course_id"], state.get("user_id", ""))
+    try:
+        selection = select_document(documents, topic, [], state.get("explain_document_id"), 0.7)
+    except ValueError:
+        selection = None
+    if selection is None or selection.document is None:
+        metrics.retrieval["qcm_source_gap"] = True
+        return {**result, "qcm_result": "Sélectionnez un seul PDF indexé ou indiquez son nom exact."}
+
+    try:
+        inventory = await load_qcm_inventory(selection.document, state.get("user_id", ""), ordinals)
+    except QcmSourceError as exc:
+        metrics.retrieval["qcm_source_gap"] = True
+        return {**result, "qcm_result": str(exc)}
+    metrics.retrieval["qcm_verified_questions"] = len(inventory.items)
+    with metrics.time("generation"):
+        answer = await generate_qcm(
+            inventory, provider=state.get("provider"), model=state.get("model"), api_key=state.get("api_key"),
+            request_id=state.get("model_request_id") or state.get("request_id"),
+            deadline=deadline, progress=state.get("progress"), preview=state.get("qcm_preview"),
+        )
+    metrics.model_attempts = answer.attempts
+    return {
+        **result,
+        "qcm_inventory": inventory,
+        "qcm_result": answer.markdown,
+        "qcm_status": answer.status,
+    }
+
+
 async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> SocraState:
     topic = (state.get("student_message") or "").strip()
     course_id = state.get("course_id", "")
     if not topic or not course_id:
         raise ValueError("A topic and course are required for an explanation")
+    if os.getenv("EXPLAIN_FIRST_FIVE_QCM") == "1" and is_qcm_solve_request(topic):
+        # Leave five seconds to return a partial result after the provider deadline.
+        deadline = asyncio.get_running_loop().time() + 360
+        try:
+            async with asyncio.timeout_at(deadline):
+                return await _solve_qcm(state, topic, metrics, deadline - 5)
+        except TimeoutError:
+            return {**state, "current_node": "explicateur", "qcm_status": "failed",
+                    "qcm_result": "Le délai de préparation du corrigé du QCM a été dépassé."}
     style, assignment_mode = _request_style(topic)
     brief = style == "short summary"
     intent_enabled = explain_flag("EXPLAIN_INTENT_PLANS")
