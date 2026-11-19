@@ -3,10 +3,12 @@ services:
     name: socra-backend
     runtime: python
     plan: free
-    buildCommand: npm ci --prefix socra --omit=dev && cd socra-backend && uv sync --locked --no-dev
-    startCommand: cd socra-backend && uv run uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: npm ci --prefix socra --omit=dev && python -m pip install uv==0.11.6 && cd socra-backend && python -m uv sync --locked --no-dev
+    startCommand: cd socra-backend && .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.11"
       - key: FRONTEND_URL
         sync: false
       - key: SUPABASE_URL

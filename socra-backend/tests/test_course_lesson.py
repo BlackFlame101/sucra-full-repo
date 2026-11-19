@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, Mock, patch
 from google.genai.errors import ServerError
 
 from agents import explicateur
-from agents.course_lesson import Topic, _journal_code, _math_complete, _validate, _worked_math, generate_course_lesson, lesson_mode, lesson_outline
+from agents.course_lesson import (
+    Topic, _body_issue, _equations, _journal_code, _math_complete, _normalize_solution_body, _validate, _worked_math,
+    fence_python_code, generate_course_lesson, lesson_mode, lesson_outline,
+)
 from agents.explain_tasks import resolve_explain_request
 
 
@@ -231,6 +234,86 @@ class LessonTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(issues)
         self.assertIn("p3", verified)
 
+    def test_citation_diagnostics_identify_the_failed_check(self):
+        target = [Topic("p3", "Contribution", (3,), 1)]
+        indexed = {3: SOURCE}
+        cases = (
+            ([], "missing"),
+            ([{"page": 4, "quote": SOURCE}], "page_outside_topic"),
+            ([{"page": 3, "quote": "short"}], "quote_too_short"),
+            ([{"page": 3, "quote": "Cette longue citation est absente de la source."}], "quote_not_found"),
+        )
+        for citations, reason in cases:
+            with self.subTest(reason=reason):
+                record = {"id": "p3", "body": BODY, "citations": citations}
+                with self.assertLogs("agents.course_lesson", level="INFO") as captured:
+                    accepted, issues = _validate(
+                        response([record]), target, indexed, "detailed", "French", set(), request_id="test-request",
+                    )
+                self.assertEqual((accepted, issues), ({}, ["p3:citation"]))
+                self.assertIn("request_id=test-request", captured.output[0])
+                diagnostic = "reason=missing" if reason == "missing" else reason
+                self.assertIn(diagnostic, "\n".join(captured.output))
+
+    def test_partial_citations_keep_a_topic_with_valid_sources(self):
+        target = [Topic("p3", "Contribution", (3, 7), 1)]
+        second_source = "Un second extrait décrit la même contribution dans un contexte distinct."
+        indexed = {3: SOURCE, 7: second_source}
+        record = {
+            "id": "p3", "body": BODY,
+            "citations": [
+                {"page": 3, "quote": SOURCE},
+                {"page": 7, "quote": second_source},
+                {"page": 9, "quote": SOURCE},
+                {"page": 3, "quote": "citation courte"},
+            ],
+        }
+        with self.assertLogs("agents.course_lesson", level="DEBUG") as captured:
+            accepted, issues = _validate(response([record]), target, indexed, "standard", "French", set())
+        self.assertEqual(issues, [])
+        self.assertEqual(accepted["p3"][1], [3, 7])
+        self.assertIn("accepted=2", captured.output[0])
+        self.assertIn("'page_outside_topic': 1", captured.output[0])
+        self.assertIn("'quote_too_short': 1", captured.output[0])
+
+    def test_topic_headings_are_normalized_and_source_urls_are_allowed(self):
+        target = [Topic("p3", "Contribution", (3,), 1)]
+        url = "http://127.0.0.1:5000"
+        indexed = {3: SOURCE + "\nServeur local : " + url}
+        record = {
+            "id": "p3",
+            "body": f"# Contribution\n\n### Méthode ###\n\n{BODY}\n\nAdresse : {url}",
+            "citations": [{"page": 3, "quote": SOURCE}],
+        }
+        accepted, issues = _validate(response([record]), target, indexed, "standard", "French", set())
+        self.assertEqual(issues, [])
+        self.assertIn("**Méthode**", accepted["p3"][0])
+        self.assertNotIn("# Contribution", accepted["p3"][0])
+        self.assertIn(url, accepted["p3"][0])
+
+        record["body"] = f"{BODY}\n\nAdresse : https://example.invalid"
+        accepted, issues = _validate(response([record]), target, indexed, "standard", "French", set())
+        self.assertEqual(accepted, {})
+        self.assertEqual(issues, ["p3:unexpected_link"])
+
+        record["body"] = f"{BODY}\n\n[Serveur]({url})"
+        accepted, issues = _validate(response([record]), target, indexed, "standard", "French", set())
+        self.assertEqual(accepted, {})
+        self.assertEqual(issues, ["p3:unexpected_link"])
+
+    def test_equation_inventory_excludes_scalar_metrics_and_parameters(self):
+        topic = Topic("p3", "Tracking", (3,), 1)
+        indexed = {3: (
+            "f1 = 0.8636\n"
+            "n_estimators = 300\n"
+            "max_depth = 12\n"
+            "score = 2.7 * freq - 2.6 * anciennete"
+        )}
+        self.assertEqual(
+            _equations(topic, indexed),
+            ("score = 2.7 * freq - 2.6 * anciennete",),
+        )
+
     async def test_summary_uses_one_dispatch_and_no_tools(self):
         short = "Les différences entre prédictions indiquent comment les variables contribuent au résultat du modèle."
         llm = Mock()
@@ -254,7 +337,10 @@ class LessonTests(unittest.IsolatedAsyncioTestCase):
         llm = Mock()
         llm.bind.return_value.ainvoke = AsyncMock(side_effect=[
             response([row("p3", 3), row("p4", 4, BODY + " Ce second exemple illustre le mécanisme.")]),
-            response([row("p6", 6, "Cette autre analyse examine le même mécanisme. " + BODY)]),
+            response([
+                row("p6", 6, "Cette autre analyse examine le même mécanisme. " + BODY),
+                row("p7", 7, "Pour ce second point, voici une explication complète. " + BODY),
+            ]),
             RuntimeError("offline failure"),
         ])
         with patch("agents.course_lesson.get_chat_llm", return_value=llm):
@@ -271,6 +357,44 @@ class LessonTests(unittest.IsolatedAsyncioTestCase):
         packets = [json.loads(call.args[0][1].content) for call in llm.bind.return_value.ainvoke.await_args_list]
         self.assertEqual(packets[1]["completed_topics"], ["p3", "p4"])
         self.assertEqual([row["page"] for row in packets[1]["indexed_source"]], [6, 7])
+
+    async def test_exhaustive_repair_targets_only_rejected_topics(self):
+        request = resolve_explain_request("Explique le chapitre 6 de façon exhaustive")
+        targets = [
+            Topic("p3", "Contribution", (3,), 1),
+            Topic("p4", "Mécanisme", (4,), 1),
+        ]
+        initial = response([
+            row("p3", 3, "Pour le sujet p3, voici une explication détaillée. " + BODY),
+            row("p4", 4, "Pour le sujet p4, voici une explication détaillée. " + BODY,
+                "Citation absente de la source"),
+        ])
+        repaired = response([
+            row("p4", 4, "Pour le sujet p4, voici une explication corrigée et détaillée. " + BODY),
+        ])
+        llm = Mock()
+        llm.bind.return_value.ainvoke = AsyncMock(side_effect=[initial, repaired])
+        with (
+            patch("agents.course_lesson.get_chat_llm", return_value=llm),
+            patch("agents.course_lesson.lesson_outline", return_value=targets),
+        ):
+            result = await generate_course_lesson(
+                DOC, PAGES, INDEXED, MAP, request, model=None, provider="google", api_key=None,
+                request_id="offline", deadline=asyncio.get_running_loop().time() + 10,
+            )
+        self.assertEqual(result.status, "unreviewed")
+        self.assertEqual(result.missing, ())
+        self.assertIn("Contribution", result.markdown)
+        self.assertIn("Mécanisme", result.markdown)
+        self.assertEqual(llm.bind.return_value.ainvoke.await_count, 2)
+
+        repair_messages = llm.bind.return_value.ainvoke.await_args_list[1].args[0]
+        repair_packet = json.loads(repair_messages[1].content)
+        self.assertEqual([target["id"] for target in repair_packet["targets"]], ["p4"])
+        self.assertEqual(repair_packet["completed_topics"], ["p3"])
+        self.assertEqual([source["page"] for source in repair_packet["indexed_source"]], [4])
+        repair_details = json.loads(repair_messages[2].content)
+        self.assertEqual([draft["id"] for draft in repair_details["failed_topic_drafts"]], ["p4"])
 
     async def test_chapter_route_uses_owned_selected_pdf(self):
         with (
@@ -311,3 +435,212 @@ class LessonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preview.await_count, 4)
         positions = [result.markdown.index(t.title) for t in targets]
         self.assertEqual(positions, sorted(positions))
+
+    def test_full_report_solve_is_solutions_mode_without_changing_plain_tp_prompt(self):
+        plain = resolve_explain_request("Résous ce TP")
+        self.assertNotEqual(lesson_mode(plain), "solutions")
+        request = resolve_explain_request("Résous ce TP", format_override="full_document")
+        self.assertEqual((request.action, request.scope, lesson_mode(request)),
+                         ("solve", "whole_document", "solutions"))
+        exercises = resolve_explain_request("Solve all the exercises", format_override="full_document")
+        self.assertEqual((exercises.action, exercises.scope, lesson_mode(exercises)),
+                         ("solve", "exercises", "solutions"))
+
+    def test_solutions_outline_uses_exercise_inventory(self):
+        pages = [f"Exercice {index} : Tâche {index}\n{SOURCE}" for index in range(1, 7)]
+        request = resolve_explain_request("Résous ce TP", format_override="full_document")
+        topics = lesson_outline(DOC, pages, MAP, request)
+        self.assertEqual([topic.title for topic in topics], [f"Exercice {index}" for index in range(1, 7)])
+        self.assertEqual([topic.group for topic in topics], [1, 1, 2, 2, 3, 3])
+        self.assertNotEqual([topic.id for topic in topics], [item.id for item in lesson_outline(
+            DOC, pages, MAP, resolve_explain_request("Explique ce PDF"))])
+
+    def test_fence_python_code_recovers_scripts_shell_and_invalid_blocks(self):
+        spark = fence_python_code('Intro\nsc = SparkContext("local")\nprint(sc)\nsc.stop()\nFin')
+        self.assertIn("```python", spark)
+        self.assertIn('sc = SparkContext("local")', spark)
+        shell = fence_python_code("Lancez :\npython ex2_top_mots.py data/test.txt 3\nensuite")
+        self.assertIn("```bash", shell)
+        self.assertIn("python ex2_top_mots.py data/test.txt 3", shell)
+        broken = 'print("hello"\nvalue = 1\nprint(value)'
+        flagged = fence_python_code("Exercice 6\n" + broken)
+        self.assertIn("python unverified", flagged)
+        self.assertIn('print("hello"', flagged)
+        self.assertNotIn("```python\nprint", flagged)
+        comment = "# comment\nvalue = 1\nprint(value)"
+        self.assertEqual(_body_issue(BODY + "\n" + comment, "standard", "French", set()), "unfenced_code")
+        repaired = fence_python_code(BODY + "\n" + comment)
+        self.assertIsNone(_body_issue(repaired, "standard", "French", set()))
+        self.assertIn("```python", repaired)
+
+    def test_unfenced_comment_code_is_repaired_not_dropped(self):
+        target = [Topic("ex6", "Exercice 6", (1,), 1)]
+        indexed = {1: "Exercice 6 : Affichage\n" + SOURCE}
+        body = BODY + "\nnon couvert par le cours\n# comment\nvalue = 1\nprint(value)"
+        accepted, issues = _validate(
+            response([{"id": "ex6", "body": body, "citations": [{"page": 1, "quote": SOURCE}]}]),
+            target, indexed, "solutions", "French", set(),
+        )
+        self.assertEqual(issues, [])
+        self.assertIn("ex6", accepted)
+        self.assertIn("```python", accepted["ex6"][0])
+        self.assertNotIn("unexpected_link_or_heading", "".join(issues))
+
+    def test_solution_normalization_preserves_code_and_rejects_external_links(self):
+        body = (
+            "### Méthode\n\n" + BODY + "\n\nNon couvert par le cours. "
+            "[PDF](/api/documents/view/lesson-pdf?page=1)\n\n```python\n# ## code heading\nprint(1)\n```"
+        )
+        normalized = _normalize_solution_body(body)
+        self.assertIn("**Méthode**", normalized)
+        self.assertNotIn("](/api/documents/view/", normalized)
+        self.assertIn("```python\n# ## code heading\nprint(1)\n```", normalized)
+        target = [Topic("ex1", "Exercice 1", (1,), 1)]
+        indexed = {1: SOURCE}
+        record = {
+            "id": "ex1", "body": body,
+            "citations": [{"page": 1, "quote": SOURCE}],
+            "code_blocks": [{"label": "script", "language": "python", "code": "print(1)"}],
+        }
+        accepted, issues = _validate(response([record]), target, indexed, "solutions", "French", set())
+        self.assertEqual(issues, [])
+        self.assertIn("**Méthode**", accepted["ex1"][0])
+        record["citations"] = []
+        accepted, issues = _validate(response([record]), target, indexed, "solutions", "French", set())
+        self.assertEqual(issues, [])
+        self.assertEqual(accepted["ex1"][1], [1])
+        record["body"] = BODY + "\n\nNon couvert par le cours. [PDF](https://example.com/file.pdf)"
+        accepted, issues = _validate(response([record]), target, indexed, "solutions", "French", set())
+        self.assertEqual(accepted, {})
+        self.assertEqual(issues, ["ex1:unexpected_link"])
+
+    async def test_six_exercise_tp_offline_solutions(self):
+        pages = [f"Exercice {index} : Tâche {index}\n{SOURCE}" for index in range(1, 7)]
+        indexed = dict(enumerate(pages, 1))
+        request = resolve_explain_request("Résous ce TP", format_override="full_document")
+        topics = lesson_outline(DOC, pages, [], request)
+        self.assertEqual(len(topics), 6)
+
+        def solution(topic, *, code=True, broken=False):
+            extra = '\nprint("hello"\nvalue = 1\nprint(value)' if broken else ""
+            record = {
+                "id": topic.id, "body": BODY + " Solution non couvert par le cours." + extra,
+                "citations": [{"page": topic.pages[0], "quote": SOURCE}],
+            }
+            if code:
+                record["code_blocks"] = [{"label": "script", "language": "python", "code": "print(1)\nprint(2)"}]
+            return record
+
+        llm = Mock()
+        groups = [topics[index:index + 2] for index in range(0, 6, 2)]
+        llm.bind.return_value.ainvoke = AsyncMock(side_effect=[
+            response([solution(topic, broken=topic.title == "Exercice 6") for topic in group])
+            for group in groups
+        ])
+        with patch("agents.course_lesson.get_chat_llm", return_value=llm):
+            result = await generate_course_lesson(
+                DOC, pages, indexed, [], request, model=None, provider="google", api_key=None,
+                request_id="offline", deadline=asyncio.get_running_loop().time() + 20,
+            )
+        self.assertEqual(result.missing, ())
+        for title in (topic.title for topic in topics):
+            self.assertIn(title, result.markdown)
+        self.assertGreaterEqual(result.markdown.count("```"), 12)
+        self.assertIn("python unverified", result.markdown)
+        self.assertIn('print("hello"', result.markdown)
+        packets = [json.loads(call.args[0][1].content) for call in llm.bind.return_value.ainvoke.await_args_list]
+        self.assertEqual([len(packet["targets"]) for packet in packets], [2, 2, 2])
+        self.assertIn("Implementation is requested", llm.bind.return_value.ainvoke.await_args_list[0].args[0][0].content)
+
+    async def test_single_exercise_generation_filters_the_inventory(self):
+        pages = [f"Exercice {index} : Tâche {index}\n{SOURCE}" for index in range(1, 7)]
+        indexed = dict(enumerate(pages, 1))
+        prompt = "Résous l'exercice 1"
+        exercise_numbers = explicateur._requested_exercise_numbers(prompt, multilingual=True)
+        request = resolve_explain_request(prompt, exercise_numbers=exercise_numbers, explicit_exercise=True)
+        self.assertEqual(request.task.intent, "solve_single_exercise")
+        target = lesson_outline(DOC, pages, [], request)[0]
+        llm = Mock()
+        llm.bind.return_value.ainvoke = AsyncMock(return_value=response([{
+            "id": target.id, "body": BODY + " Solution non couvert par le cours.",
+            "citations": [{"page": target.pages[0], "quote": SOURCE}],
+            "code_blocks": [{"label": "script", "language": "python", "code": "print(1)"}],
+        }]))
+        with patch("agents.course_lesson.get_chat_llm", return_value=llm):
+            result = await generate_course_lesson(
+                DOC, pages, indexed, [], request, model=None, provider="google", api_key=None,
+                request_id="offline", deadline=asyncio.get_running_loop().time() + 5,
+                exercise_numbers=exercise_numbers,
+            )
+        self.assertEqual(result.missing, ())
+        self.assertEqual(llm.bind.return_value.ainvoke.await_count, 1)
+        packet = json.loads(llm.bind.return_value.ainvoke.await_args.args[0][1].content)
+        self.assertEqual([item["id"] for item in packet["targets"]], ["ex1"])
+
+    async def test_repair_server_error_retains_initial_valid_sections(self):
+        pages = [f"Exercice {index} : Tâche {index}\n{SOURCE}" for index in range(1, 3)]
+        indexed = dict(enumerate(pages, 1))
+        request = resolve_explain_request(
+            "Résous les exercices 1 et 2", exercise_numbers=["1", "2"], explicit_exercise=True,
+        )
+        topics = lesson_outline(DOC, pages, [], request)
+        initial = []
+        for topic in topics:
+            row_data = {
+                "id": topic.id, "body": BODY + f" Solution de l'exercice {topic.id[2:]} non couvert par le cours.",
+                "citations": [{"page": topic.pages[0], "quote": SOURCE}],
+            }
+            if topic.id == "ex1":
+                row_data["code_blocks"] = [{"label": "script", "language": "python", "code": "print(1)"}]
+            initial.append(row_data)
+        llm = Mock()
+        llm.bind.return_value.ainvoke = AsyncMock(side_effect=[
+            response(initial), ServerError(503, {"error": {"message": "Unavailable"}}),
+        ])
+        with patch("agents.course_lesson.get_chat_llm", return_value=llm):
+            result = await generate_course_lesson(
+                DOC, pages, indexed, [], request, model=None, provider="google", api_key=None,
+                request_id="offline", deadline=asyncio.get_running_loop().time() + 5,
+                exercise_numbers=["1", "2"],
+            )
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.missing, ("Exercice 2",))
+        self.assertIn("Exercice 1", result.markdown)
+        self.assertIn("Sections incomplètes", result.markdown)
+        self.assertEqual(llm.bind.return_value.ainvoke.await_count, 2)
+
+        responses = []
+        for group in groups:
+            payload = response([solution(topic, code=topic.title != "Exercice 4") for topic in group])
+            responses.extend((payload, payload))
+        llm.bind.return_value.ainvoke = AsyncMock(side_effect=responses)
+        with patch("agents.course_lesson.get_chat_llm", return_value=llm):
+            incomplete = await generate_course_lesson(
+                DOC, pages, indexed, [], request, model=None, provider="google", api_key=None,
+                request_id="offline", deadline=asyncio.get_running_loop().time() + 20,
+            )
+        self.assertEqual(incomplete.missing, ("Exercice 4",))
+
+    async def test_full_document_solve_reaches_lesson_generator(self):
+        pages = [f"Exercice {index} : Tâche {index}\n{SOURCE}" for index in range(1, 7)]
+        chunks = [{"id": f"c{index}", "page_number": index, "content": page} for index, page in enumerate(pages, 1)]
+        lesson = SimpleNamespace(markdown="# Corrigé", status="unreviewed", attempts=1, missing=())
+        with (
+            patch.object(explicateur, "course_documents", AsyncMock(return_value=[DOC])),
+            patch.object(explicateur, "load_owned_explain_pages", AsyncMock(return_value=pages)),
+            patch.object(explicateur, "load_explain_course_map", AsyncMock(return_value=[])),
+            patch.object(explicateur, "document_inventory_chunks", AsyncMock(return_value=(chunks, "full_document"))),
+            patch.object(explicateur, "generate_course_lesson", AsyncMock(return_value=lesson)) as generate,
+            patch.object(explicateur, "get_chat_llm", side_effect=AssertionError("normal explainer")),
+        ):
+            result = await explicateur.run_explicateur({
+                "mode": "explain", "student_message": "Résous l'exercice 1",
+                "course_id": "course", "user_id": "owner", "explain_document_id": DOC["id"],
+                "explain_format": "full_document",
+            })
+        generate.assert_awaited_once()
+        self.assertEqual(generate.await_args.args[4].action, "solve")
+        self.assertEqual(lesson_mode(generate.await_args.args[4]), "solutions")
+        self.assertEqual(generate.await_args.args[4].task.intent, "solve_single_exercise")
+        self.assertEqual(generate.await_args.kwargs["exercise_numbers"], ["1"])
+        self.assertEqual(result["course_lesson_status"], "unreviewed")

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 from hashlib import sha256
 import logging
@@ -21,7 +22,7 @@ from uuid import UUID
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agents.course_lesson import LESSON_SECONDS, generate_course_lesson
+from agents.course_lesson import LESSON_SECONDS, fence_python_code, generate_course_lesson
 from agents.metrics import structured_failure
 from agents.explanation_preview import explanation_preview
 from agents.explain_budget import ExplainBudget, explain_budget
@@ -380,6 +381,31 @@ def _assignment_inventory(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(found.values())
 
 
+def _required_python_exercises(chunks: list[dict[str, Any]]) -> set[str]:
+    source = "\n".join(str(chunk.get("content") or "") for chunk in chunks)
+    headings = list(_EXERCISE_HEADING.finditer(source))
+    return {
+        match["number"].casefold().translate(_ASCII_DIGITS)
+        for i, match in enumerate(headings)
+        if re.search(r"\b(?:[ée]crire|write|cr[ée]er|create|implement|impl[ée]menter)\b[^.!?]{0,110}\b[\w.-]+\.py\b",
+                     source[match.start():headings[i + 1].start() if i + 1 < len(headings) else len(source)], re.I)
+    }
+
+
+def _has_python_solution(section: ExplanationSection) -> bool:
+    fragments = [section.code] if section.code else []
+    fragments.extend(match["body"] for match in _LAB_FENCE.finditer(section.content)
+                     if match["tag"].casefold() in {"python", "py", ""})
+    for code in fragments:
+        try:
+            if ast.parse(code).body:
+                compile(code, "<exercise solution>", "exec", dont_inherit=True)
+                return True
+        except (SyntaxError, ValueError):
+            continue
+    return False
+
+
 def _explicit_exercise_request(message: str) -> bool:
     return any(
         not _GUIDANCE_PREFIX.search(message[max(0, match.start() - 80):match.start()])
@@ -536,6 +562,8 @@ def _normalize_explanation_payload(
                             entry["code"] = ""
                 item.setdefault("code", "")
                 item.setdefault("code_language", "")
+                if isinstance(item.get("content"), str) and mode != "short_summary":
+                    item["content"] = fence_python_code(item["content"])
                 if mode in {"short_summary", "standard", "beginner", "revision_sheet", "full_course"}:
                     content = item.get("content") or ""
                     snippet = item["code"] if isinstance(item["code"], str) else ""
@@ -1264,6 +1292,7 @@ async def _teach_course(state: SocraState, topic: str, request: ExplainRequest, 
                     provider=state.get("provider"), api_key=state.get("api_key"),
                     request_id=state.get("model_request_id") or state.get("request_id"),
                     deadline=deadline - 5, preview=state.get("preview"), progress=state.get("progress"),
+                    exercise_numbers=_requested_exercise_numbers(topic, multilingual=True),
                 )
     except ExplainSourceError:
         return {**result, "course_lesson_text": "Le chapitre demandé n’a pas pu être vérifié dans le PDF indexé sélectionné."
@@ -1395,10 +1424,14 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         if report is not None:
             return report
     if (not prior_part and (os.getenv("EXPLAIN_COURSE_LESSONS") == "1" or state.get("explain_format") == "full_document")
-            and request.action in {"explain", "summarize"}
+            and (request.action in {"explain", "summarize"}
+                 or (request.action == "solve" and state.get("explain_format") == "full_document"
+                     and request.scope in {"whole_document", "td", "exercises"}))
             and (request.scope == "chapter"
                  or (request.scope == "whole_document" and request.depth == "exhaustive"
-                     and request.intent.intent not in {"revision_sheet", "summary"}))):
+                     and request.intent.intent not in {"revision_sheet", "summary"})
+                 or (request.action == "solve" and state.get("explain_format") == "full_document"
+                     and request.scope in {"whole_document", "td", "exercises"}))):
         return await _teach_course(state, topic, request, metrics)
     if not prior_part and os.getenv("EXPLAIN_SCOPED_SOURCES") == "1" and request.scope in {"chapter", "part", "td"}:
         return await _prepare_scope_manifest(state, topic, request)
@@ -1416,7 +1449,7 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
         task_modes_enabled=task_modes, document_inventory_enabled=inventory_enabled,
         coverage_check_enabled=coverage_enabled,
     )
-    if task_modes or intent_enabled or brief:
+    if task_modes or intent_enabled or brief or request.scope == "exercises":
         task = request.task
         solving = task.intent in {"solve_single_exercise", "solve_multiple_exercises"}
         assignment_mode = solving
@@ -1429,7 +1462,10 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
     exhaustive = full_course or bool(not brief and scope_task and (
         scope_task.detail_level == "exhaustive" or requests_whole_document(topic)
     ))
-    use_inventory = bool(full_course or explicit_document or inventory_enabled and (exhaustive or re.search(r"\.pdf\b", topic, re.I)))
+    use_inventory = bool(full_course or explicit_document
+                         or request.scope == "exercises" and state.get("explain_format") == "full_document"
+                         or request.scope == "exercises" and exhaustive and state.get("user_id")
+                         or inventory_enabled and (exhaustive or re.search(r"\.pdf\b", topic, re.I)))
     owner_id = state.get("user_id", "")
     documents = None
     if use_inventory:
@@ -1462,7 +1498,9 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
             chunks = [*chunks, *(c for c in extra if (str(c.get("document_id")), c.get("page_number")) not in seen)][:30]
     if intent:
         names = sorted({str(chunk["filename"]) for chunk in chunks if chunk.get("filename")})
-        intent = resolve_explain_request(topic, *language_settings, source_names=names).intent
+        intent = resolve_explain_request(topic, *language_settings, source_names=names,
+                                         exercise_numbers=exercise_numbers, explicit_exercise=solving,
+                                         format_override=state.get("explain_format")).intent
         metrics.retrieval.update(educational_intent=intent.intent, student_level=intent.level,
                                  requested_scope=intent.scope, document_kind=intent.document_kind,
                                  educational_language=intent.language)
@@ -1491,6 +1529,7 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
     indexed_chunks = chunks
     token_budget = None
     course_part = None
+    scope = "retrieved_only"
     if use_inventory:
         scope = "retrieved_only"
         reason = "catalog_unavailable"
@@ -1516,7 +1555,7 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
             if selection.document and (exhaustive or explicit_document and not chunks):
                 try:
                     indexed_chunks, scope = await document_inventory_chunks(course_id, owner_id, selection.document, chunks)
-                    if explicit_document and not chunks and scope == "full_document":
+                    if scope == "full_document" and (request.scope == "exercises" and exhaustive or explicit_document and not chunks):
                         chunks = indexed_chunks
                 except Exception as exc:
                     logger.warning("explain_document_index_unavailable error_type=%s", type(exc).__name__)
@@ -1679,7 +1718,7 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
             or _EXERCISE_HEADING.match(item["number"])["number"].casefold().translate(_ASCII_DIGITS) in exercise_numbers
         ]
     batching = bool(task and task.intent == "solve_multiple_exercises" and len(targets) > 1
-                    and explain_flag("EXPLAIN_MULTI_EXERCISE_BATCHING"))
+                    and (explain_flag("EXPLAIN_MULTI_EXERCISE_BATCHING") or scope == "full_document" and exhaustive))
     if batching:
         size = _batch_setting("SOCRA_EXPLAIN_EXERCISES_PER_BATCH", 3, minimum=3, maximum=4)
         cap = _batch_setting("SOCRA_EXPLAIN_MAX_BATCH_GROUPS", 2)
@@ -1762,6 +1801,18 @@ async def _run_explicateur(state: SocraState, metrics: _ExplainMetrics) -> Socra
                 metrics.retrieval["omitted_target_count"] = len(omitted)
                 break
         explanation = _merge_exercise_explanations(parts, deduplicate=batching, language=language) if len(parts) > 1 else parts[0]
+        if scope == "full_document" and request.scope == "exercises" and exhaustive:
+            needs_code = _required_python_exercises(indexed_chunks)
+            generated = {
+                number
+                for section in explanation.sections
+                if (match := _EXERCISE_HEADING.match(section.heading)) and (section.content.strip() or section.code.strip())
+                and ((number := match["number"].casefold().translate(_ASCII_DIGITS)) not in needs_code
+                     or _has_python_solution(section))
+            }
+            omitted = [item for item in targets
+                       if _EXERCISE_HEADING.match(item["number"])["number"].casefold().translate(_ASCII_DIGITS) not in generated]
+            metrics.retrieval["omitted_target_count"] = len(omitted)
     else:
         explanation = await _generate_valid_explanation(model, prompt, chunks, preview, progress, state, metrics, budget, task, token_budget)
         evidence_ids.update(str(chunk["id"]) for chunk in chunks if chunk.get("id"))

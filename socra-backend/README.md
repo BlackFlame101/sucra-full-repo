@@ -81,9 +81,11 @@ report for requests outside the dedicated generation routes.
 
 The Render Blueprint uses the repository root and installs the locked Node
 dependencies so the API can extract the original PDFs. If managing the service
-directly in Render Settings, clear **Root Directory** and copy the Build and
-Start Commands from `render.yaml`. Use **Save only** for environment changes
-until the new build is ready to deploy.
+directly in Render Settings, clear **Root Directory**, set
+`PYTHON_VERSION=3.12.11`, and copy the Build and Start Commands from
+`render.yaml`. The build installs uv explicitly because the lockfile lives in
+`socra-backend/`. Use **Save only** for environment changes until the new build
+is ready to deploy.
 
 For Notebook screenshots, add `NOTEBOOK_IMAGE_UPLOADS=1` in the Next.js project's
 **Vercel → Settings → Environment Variables → Production** and redeploy. Its

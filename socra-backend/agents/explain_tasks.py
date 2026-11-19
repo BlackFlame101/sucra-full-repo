@@ -52,7 +52,7 @@ _LANGUAGE_INSTRUCTION = re.compile(
 _EXERCISE = r"(?:exercises?|exercices?|تمارين|التمارين|تمرين|التمرين)"
 _GUIDANCE = r"\b(?:hints?|guidance|indices|pistes|sans (?:repondre|resoudre)|how to (?:solve|answer)|comment (?:resoudre|repondre|faire)|تلميحات|طريقة الحل|دون الحل)\b"
 _SOLVE = (
-    r"\b(?:solve|work out|complete|solutions? (?:to|for)|resous|resoudre|corrige|حل)\s+"
+    r"\b(?:solve|work out|complete|solutions? (?:to|for)|corriges? (?:de|pour)|resous|resoudre|corrige|حل)\s+"
     r"(?:(?:all(?: the)?|the|each|both|these|every|tous les|les|ces|chaque|l['’]|جميع|كل)\s*)?"
     + _EXERCISE + r"\b"
 )
@@ -179,7 +179,7 @@ def _task_profile(
             or _has(_LAB_OBJECT, text) and _has(r"\b(?:walk me through|step by step|pas a pas|خطوة بخطوة)\b", text)):
         return ExplainTask("lab_walkthrough", detail, "procedure", language, worked)
     if worked and (explicit_exercise or solve):
-        single = len(exercise_numbers) == 1 or (not exercise_numbers and not _has(
+        single = len(exercise_numbers) == 1 or (not exercise_numbers and not breadth and not _has(
             r"\b(?:exercises|exercices|تمارين|التمارين)\b", text))
         return ExplainTask("solve_single_exercise" if single else "solve_multiple_exercises",
                            detail, "exercise", language, True)
@@ -371,7 +371,17 @@ def resolve_explain_request(
         return ExplainRequest("solve", detail, "td", task, intent)
     if _requests_question_answers(text):
         return ExplainRequest("solve", detail, "question_answers", task, intent, qcm_ordinals=_qcm_ordinals(text))
+    if task.intent in {"solve_single_exercise", "solve_multiple_exercises"}:
+        if task.intent == "solve_multiple_exercises" and _has(_BREADTH, main_text):
+            task = replace(task, detail_level="exhaustive")
+            detail = "exhaustive"
+        return ExplainRequest("solve", detail, "exercises", task,
+                              replace(intent, intent="exercise_help", scope="exercises", every_chapter=False))
     if format_override == "full_document":
+        if action and action[1] in {"resous", "resoudre", "solve"} and not _has(_GUIDANCE, text):
+            return ExplainRequest("solve", "exhaustive", "whole_document", task,
+                                  replace(intent, intent="exercise_help", scope="whole_document", every_chapter=True),
+                                  closing_recap=bool(recap))
         return ExplainRequest("explain", "exhaustive", "whole_document", task,
                               replace(intent, intent="full_course", scope="whole_document", every_chapter=True),
                               closing_recap=bool(recap))
