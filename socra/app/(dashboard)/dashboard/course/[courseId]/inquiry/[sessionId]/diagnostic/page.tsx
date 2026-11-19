@@ -35,6 +35,7 @@ import {
 import { toast } from "sonner"
 import { useSocraChat } from "@/hooks/useSocraChat"
 import { TutorMessage } from "@/components/chat/TutorMessage"
+import { ExplainFormatSelect, ExplainPdfSelect } from "@/components/chat/ExplainPdfSelect"
 
 import { Button } from "@/components/ui/button"
 import { SettingsDialog } from "@/components/settings/SettingsDialog"
@@ -46,7 +47,7 @@ import {
 } from "@/lib/socra-ws"
 import { useUserSettings } from "@/hooks/useUserSettings"
 import type { Document, Course } from "@/types"
-import type { LearningMode } from "@/lib/socra-ws"
+import type { ExplainFormat, LearningMode } from "@/lib/socra-ws"
 
 
 type Phase = "picking" | "thinking" | "diagnosed" | "ready" | "error"
@@ -89,6 +90,10 @@ export default function DiagnosticPage() {
 
   const [course, setCourse] = useState<Course | null>(null)
   const [documents, setDocuments] = useState<Document[]>([])
+  const [selectedPdfId, setSelectedPdfId] = useState("")
+  const [explainFormat, setExplainFormat] = useState<ExplainFormat>()
+  const explainPdfs = documents.filter((document) => document.index_status === "ready")
+  const explainPdfId = explainPdfs.some(({ id }) => id === selectedPdfId) ? selectedPdfId : ""
   const [topic, setTopic] = useState("")
   const [learningMode, setLearningMode] = useState<LearningMode>("socratic")
   const [language, setLanguage] = useState<"fr" | "en">("fr")
@@ -198,7 +203,7 @@ export default function DiagnosticPage() {
     setDiagnostic(null)
     setModeResultReady(false)
     setPhase("thinking")
-    sendMessage({ text: trimmed, mode: learningMode })
+    sendMessage({ text: trimmed, mode: learningMode, documentId: explainPdfId, explainFormat })
     void fetch(`/api/sessions/update/${encodeURIComponent(sessionId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -208,7 +213,9 @@ export default function DiagnosticPage() {
 
   const handleContinue = () => {
     const message = learningMode === "explain" && assistant ? `&message=${encodeURIComponent(assistant.id)}` : ""
-    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}${message}`)
+    const pdf = learningMode === "explain" && explainPdfId ? `&pdf=${encodeURIComponent(explainPdfId)}` : ""
+    const format = learningMode === "explain" && explainFormat ? `&explainFormat=${explainFormat}` : ""
+    router.push(`/dashboard/course/${courseId}/inquiry/${sessionId}?mode=${learningMode}${message}${pdf}${format}`)
   }
 
   const handleStartOver = () => {
@@ -310,6 +317,8 @@ export default function DiagnosticPage() {
               Recover last request
             </Button>
           )}
+          {learningMode === "explain" && <ExplainPdfSelect documents={explainPdfs} value={explainPdfId} onChange={setSelectedPdfId} />}
+          {learningMode === "explain" && <ExplainFormatSelect value={explainFormat} onChange={setExplainFormat} />}
           <PickingPanel
             topic={topic}
             onTopicChange={setTopic}
@@ -359,7 +368,7 @@ export default function DiagnosticPage() {
           </div>
           {learningMode === "explain" && tutorOpening && !modeResultReady && (
             <TutorMessage content={tutorOpening} isStreaming={status === "streaming"} partial={partial}
-              explanationPreview={Boolean(assistantMetadata?.qcmPreview || assistantMetadata?.qcm_status)} />
+              explanationPreview />
           )}
         </div>
       )}

@@ -6,10 +6,15 @@ import { BubbleMenu } from "@tiptap/react/menus"
 import { Bold, CheckSquare, Code, Heading1, Heading2, Heading3, Italic, Link2, List, ListOrdered, Quote, Redo2, Sigma, Undo2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { closeHistory } from "@tiptap/pm/history"
+import { Selection } from "@tiptap/pm/state"
+import { Fragment, Slice } from "@tiptap/pm/model"
+import type { EditorView } from "@tiptap/pm/view"
+import { toast } from "sonner"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { suggestionNote, safeNoteLink, type NoteDocument } from "@/lib/notebook/document"
+import { fencedMarkdownPaste, suggestionNote, safeNoteLink, type NoteDocument } from "@/lib/notebook/document"
 import { notebookExtensions } from "@/lib/notebook/schema"
+import { isNotebookImagePath, notebookImageFormats, notebookImageLimit } from "@/lib/notebook/images"
 import { editRange, type EditAnchor, type EditPlacement } from "@/lib/notebook/edit-range"
 
 export type { EditAnchor, EditPlacement } from "@/lib/notebook/edit-range"
@@ -22,6 +27,41 @@ function capture(editor: Editor): EditAnchor {
   const { selection, doc } = editor.state
   return { from: selection.from, to: selection.to,
     text: doc.textBetween(selection.from, selection.to, "\n", (node) => node.attrs.latex ?? ""), document: doc }
+}
+
+function insertImages(view: EditorView, files: FileList | undefined, dropPosition?: number) {
+  const images = Array.from(files ?? []).filter(file => file.type.startsWith("image/"))
+  if (!images.length) return false
+  const original = view.state.doc
+  const selection = view.state.selection
+  void (async () => {
+    const nodes = []
+    for (const file of images) {
+      if (view.isDestroyed) return
+      try {
+        if (!Object.hasOwn(notebookImageFormats, file.type)) throw new Error("Use PNG, JPEG, or WebP images.")
+        if (file.size > notebookImageLimit) throw new Error("Images must be 4 MiB or smaller.")
+        const response = await fetch("/api/notebook/images", {
+          method: "POST", headers: { "Content-Type": file.type }, body: file,
+        })
+        const result = await response.json()
+        if (!response.ok || !isNotebookImagePath(result.path)) throw new Error(result.error || "Could not upload the image.")
+        nodes.push(view.state.schema.nodes.image.create({ src: result.path, alt: file.name.slice(0, 240) || "Notebook image" }))
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Could not upload the image.")
+      }
+    }
+    if (view.isDestroyed || !nodes.length) return
+    let transaction = view.state.tr
+    if (view.state.doc === original) {
+      transaction = transaction.setSelection(dropPosition == null ? selection : Selection.near(original.resolve(dropPosition)))
+    } else {
+      transaction = transaction.setSelection(Selection.near(view.state.selection.$to))
+    }
+    transaction.replaceSelection(new Slice(Fragment.fromArray(nodes), 0, 0))
+    view.dispatch(transaction.scrollIntoView())
+  })()
+  return true
 }
 
 export const NoteEditor = memo(function NoteEditor({ initial, onChange, onSave, handle, onSelectionRequest, spelling }: {
@@ -44,6 +84,32 @@ export const NoteEditor = memo(function NoteEditor({ initial, onChange, onSave, 
     extensions: notebookExtensions, content: initial, immediatelyRender: false, shouldRerenderOnTransaction: false,
     editorProps: {
       attributes: { class: "notebook-editor notebook-prose", role: "textbox", "aria-label": "Note content", "aria-multiline": "true", "aria-keyshortcuts": "Alt+Shift+A" },
+      nodeViews: {
+        image(node) {
+          const dom = document.createElement("img")
+          dom.alt = node.attrs.alt || "Notebook image"
+          dom.draggable = true
+          dom.referrerPolicy = "no-referrer"
+          if (isNotebookImagePath(node.attrs.src)) {
+            dom.src = `/api/notebook/images?path=${encodeURIComponent(node.attrs.src)}`
+          }
+          return { dom }
+        },
+      },
+      handlePaste(view, event) {
+        if (insertImages(view, event.clipboardData?.files)) return true
+        if (view.state.selection.$from.parent.type.spec.code || event.clipboardData?.getData("text/html")) return false
+        const pasted = fencedMarkdownPaste(event.clipboardData?.getData("text/plain") ?? "")
+        if (!pasted) return false
+        const content = view.state.schema.nodeFromJSON(pasted).content
+        view.dispatch(view.state.tr.replaceSelection(new Slice(content, 0, 0)).scrollIntoView())
+        return true
+      },
+      handleDrop(view, event, _slice, moved) {
+        if (moved) return false
+        const position = view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos
+        return insertImages(view, event.dataTransfer?.files, position)
+      },
       handleKeyDown(_view, event) {
         if (event.altKey && event.shiftKey && event.code === "KeyA" && selectionMenu.current?.getClientRects().length) {
           const first = selectionMenu.current.querySelector("button")

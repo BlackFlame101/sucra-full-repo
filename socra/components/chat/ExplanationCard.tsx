@@ -1,7 +1,7 @@
 "use client"
 
 import { useId, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps } from "react"
-import { ArrowRight, BookOpen, ChevronDown, CircleAlert, Library, NotebookPen } from "lucide-react"
+import { ArrowRight, ChevronDown, CircleAlert, Library, NotebookPen } from "lucide-react"
 import type { Tokens } from "marked"
 import { Button } from "@/components/ui/button"
 import { StudyCode, StudyMarkdown, type StudyMarkdownPresentation } from "@/components/notebook/NotebookReply"
@@ -97,15 +97,13 @@ function SourceExcerpts({ citations }: { citations: ExerciseCitation[] }) {
 
 type Checklist = StudyMarkdownPresentation["checklist"]
 
-function SectionText({ text, kind, profile, checklist, sourced = false }: {
+function SectionText({ text, kind, profile, checklist }: {
   text: CardMarkdown; kind: CardSectionKind | null; profile: CardProfile; checklist: Checklist
-  sourced?: boolean
 }) {
   const presentation: StudyMarkdownPresentation = { checklist, codeLineEnding: text.codeLineEnding, copyTables: true }
   const blocks = cardMarkdownBlocks(text.tokens, kind, profile)
   const renderBlock = (block: (typeof blocks)[number], index: number) => {
-    const metricSummary = profile === "generic" && sourced && (kind === "metrics" || block.kind === "metrics")
-    const markdown = <StudyMarkdown tokens={block.tokens} presentation={metricSummary ? { ...presentation, metricSummary } : presentation} />
+    const markdown = <StudyMarkdown tokens={block.tokens} presentation={presentation} />
     if (block.answer) return <details key={index} className={`${disclosureClass} rounded-lg bg-muted/40 px-3 py-2`}>
       <summary className={`${focusClass} cursor-pointer text-sm font-medium`}>Show answer
         <span className="sr-only"> ({block.tokens[0].type === "heading" ? (block.tokens[0] as Tokens.Heading).text : `item ${index + 1}`})</span>
@@ -119,7 +117,7 @@ function SectionText({ text, kind, profile, checklist, sourced = false }: {
         <div className="mt-2"><StudyMarkdown tokens={body} presentation={presentation} /></div>
       </details>
     }
-    const tone = block.kind && callouts[block.kind]
+    const tone = profile === "guide" && block.kind && callouts[block.kind]
     return <div key={index} className={tone ? `min-w-0 rounded-e-lg border-s-2 p-3 ${tone}`
       : profile === "guide" && block.kind === "question" ? "min-w-0 border-t pt-3" : "min-w-0"}>{markdown}</div>
   }
@@ -138,18 +136,12 @@ function SectionText({ text, kind, profile, checklist, sourced = false }: {
           {renderBlock(blocks[index + 1], index + 1)}
         </div>
       }
-      if (!block.column) return renderBlock(block, index)
-      if (blocks[index - 1]?.column) return null
-      if (!blocks[index + 1]?.column) return renderBlock(block, index)
-      return <div key={index} className="grid min-w-0 gap-2.5 @md/card:grid-cols-2">
-        {blocks.slice(index, index + 2).map((column, columnIndex) =>
-          <div key={columnIndex} className="min-w-0 rounded-lg border bg-muted/35 p-3">{renderBlock(column, columnIndex)}</div>)}
-      </div>
+      return renderBlock(block, index)
     })}
   </div>
 }
 
-function ExplanationSection({ section, profile, collapse, open, checklist, number, children, phaseSummary, phaseSources, nested = false }: {
+function ExplanationSection({ section, profile, collapse, open, checklist, number, children, phaseSummary, phaseSources, nested = false, anchor }: {
   section: ReturnType<typeof explanationCardLayout>["sections"][number]
   profile: CardProfile
   collapse: boolean
@@ -160,31 +152,32 @@ function ExplanationSection({ section, profile, collapse, open, checklist, numbe
   phaseSummary?: string
   phaseSources?: ExerciseCitation[]
   nested?: boolean
+  anchor?: string
 }) {
   const { heading, kind, text, language, code, walkthrough, citations, summary } = section
   const guide = profile === "guide"
   const disclosure = collapse && !!heading && (guide || kind !== "phase")
   const headerSources = disclosure || guide && !!heading
-  const tone = kind && callouts[kind]
+  const tone = guide && kind && callouts[kind]
   const sourceReference = kind === "reference" && citations.some((citation) => citation.document_id && citation.page_number && citation.excerpt)
+  const hasExcerpts = citations.some((citation) => citation.excerpt)
   const hasText = text.tokens.some((token) => token.type !== "space")
   const onlyHeading = !hasText && !code && !walkthrough.length && !citations.length
   if (onlyHeading && !heading) return null
 
-  const body = <div className={`min-w-0 space-y-3 text-sm leading-relaxed sm:text-[15px] ${nested ? "pb-1.5" : "pb-4 sm:pb-5"} ${guide && disclosure ? "px-3 sm:px-4" : ""}`} dir="auto">
+  const body = <div className={`explanation-document-body min-w-0 space-y-3 ${nested ? "pb-1.5" : "pb-5 sm:pb-6"} ${guide && disclosure ? "px-3 sm:px-4" : ""}`} dir="auto">
     {(hasText || sourceReference) && <div className={tone ? `min-w-0 rounded-e-lg border-s-2 p-3 ${tone}` : "min-w-0"}>
       {sourceReference && <p className={supportLabel + " mb-1"}>Source reference</p>}
-      <SectionText text={text} kind={kind} profile={profile} checklist={checklist}
-        sourced={citations.some(({ document_id, page_number }) => !!document_id && !!page_number)} />
+      <SectionText text={text} kind={kind} profile={profile} checklist={checklist} />
     </div>}
     {code && <StudyCode value={code} language={language} />}
     {walkthrough.map((item, index) => <div className="space-y-2" key={index}>
       {item.code && <StudyCode value={item.code} language={language} />}
       {item.explanation?.trim() && <StudyMarkdown content={item.explanation} />}
     </div>)}
-    {!!citations.length && <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
-      {!headerSources && <PageLinks citations={citations} compact />}
-      {citations.some((citation) => citation.excerpt) && <details className={`${disclosureClass} text-xs text-muted-foreground`}>
+    {!!citations.length && (hasExcerpts || (!headerSources && !anchor)) && <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+      {!headerSources && !anchor && <PageLinks citations={citations} compact />}
+      {hasExcerpts && <details className={`${disclosureClass} text-xs text-muted-foreground`}>
         <summary className={`${focusClass} cursor-pointer`}>{kind === "checkpoint" ? "Screenshot source" : "Section excerpts"}</summary>
         <SourceExcerpts citations={citations} />
       </details>}
@@ -209,10 +202,10 @@ function ExplanationSection({ section, profile, collapse, open, checklist, numbe
       </summary>
       {body}
     </details>
-    : <section className={profile === "compact" ? "" : "border-t first:border-t-0"}>
-      {heading && <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-2">
-        <h4 dir="auto" className={`font-semibold [overflow-wrap:anywhere] ${profile === "compact" ? supportLabel + " mb-2" : profile === "generic" ? supportLabel + " py-3.5" : nested ? "py-2 text-sm" : "py-3.5"}`}>{heading}</h4>
-        {headerSources && <PageLinks citations={citations} compact />}
+    : <section id={anchor} className={profile === "compact" ? "" : "scroll-mt-5 border-t first:border-t-0"}>
+      {heading && <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3">
+        <h4 dir="auto" className={`font-semibold [overflow-wrap:anywhere] ${profile === "compact" ? supportLabel + " mb-2" : profile === "generic" ? "py-3.5 text-base sm:text-lg" : nested ? "py-2 text-sm" : "py-3.5"}`}>{heading}</h4>
+        {(headerSources || anchor) && <PageLinks citations={citations} compact />}
       </div>}
       {!onlyHeading && body}
     </section>
@@ -288,6 +281,9 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
     covered: "Covered", partial: "Partial", missing: "Missing", unverifiable: "Unverifiable", not_yet_generated: "Not yet generated",
   }
   const compact = profile === "compact"
+  const report = profile !== "compact" && profile !== "guide"
+  const reportSections = report ? sections.filter(({ heading }) => heading) : []
+  const sectionAnchor = (index: number) => `${id}-section-${index}`
   const compactHeading = compact && !title && !definition.tokens.length && !intuition.tokens.length && sections.length === 1
     ? sections[0].heading : ""
   const sourceFooter = (extraPages.length > 0 || extraExcerpts.length > 0) && <footer className="space-y-1.5 border-t py-2.5">
@@ -301,15 +297,14 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
   </footer>
 
   return <article aria-labelledby={id} data-explanation-card={profile}
-    className="@container/card mb-4 w-full min-w-0 max-w-full rounded-2xl border border-primary/20 bg-card text-card-foreground shadow-sm [&_:is(p,blockquote,ol,ul):not(:has(pre,table))]:max-w-[46rem] print:border-0 print:shadow-none">
+    className="explanation-document @container/card mb-4 w-full min-w-0 max-w-full">
     <div className="space-y-3 px-4 pt-4 sm:px-6 sm:pt-5 print:px-0">
       <header className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0" id={id}>
-          {label && title && <p className={supportLabel + " mb-1"}>{label}</p>}
-          {title ? <div dir="auto" className="[&_h3]:font-sans [&_h3]:text-xl [&_h3]:tracking-tight sm:[&_h3]:text-2xl">
+          {title ? <div dir="auto">
             <StudyMarkdown tokens={[title]} presentation={{}} />
-          </div> : <h3 className="flex items-center gap-2 text-base font-semibold">
-            <BookOpen className="size-4 shrink-0 text-primary" aria-hidden />{label || compactHeading || "Course explanation"}
+          </div> : <h3>
+            {compactHeading || label || "Course explanation"}
           </h3>}
         </div>
         {!readOnly && (onSaveToLibrary || notebookCapture) && <div className="flex flex-wrap gap-1.5 print:hidden">
@@ -324,12 +319,22 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
       {notices.length > 0 && <div className="space-y-1.5" role="status">
         {notices.map((notice, index) => <CoverageNotice key={index} {...notice} />)}
       </div>}
-      {!!definition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-base">
+      {!!definition.tokens.length && <div dir="auto" className="explanation-document-body">
         <SectionText text={definition} kind={null} profile={profile} checklist={checklist} />
       </div>}
-      {!!intuition.tokens.length && <div dir="auto" className="text-sm leading-relaxed sm:text-[15px]">
+      {!!intuition.tokens.length && <div dir="auto" className="explanation-document-body">
         <StudyMarkdown tokens={intuition.tokens} presentation={{ checklist, codeLineEnding: intuition.codeLineEnding }} />
       </div>}
+      {reportSections.length >= 3 && <nav aria-label={french ? "Dans cette explication" : "In this explanation"}
+        className="explanation-document-outline border-s-2 ps-3 text-sm print:hidden">
+        <p className="mb-1.5 font-medium">{french ? "Dans cette explication" : "In this explanation"}</p>
+        <ul className="flex flex-wrap gap-x-4 gap-y-1">
+          {reportSections.map(({ index, heading }) => <li key={index}>
+            <a className={`${focusClass} text-secondary underline underline-offset-4`} dir="auto"
+              href={`#${sectionAnchor(index)}`}>{heading}</a>
+          </li>)}
+        </ul>
+      </nav>}
     </div>
     {course && <div className="mx-4 space-y-2 border-t py-3 text-sm sm:mx-6">
       <h3 className="font-medium">{french ? `Partie ${course.part} sur ${course.total_parts}` : `Part ${course.part} of ${course.total_parts}`}</h3>
@@ -380,10 +385,11 @@ export function ExplanationCard({ explanation, onDiscuss, onContinueCourse, onSa
             section={child} profile={profile} collapse={false} open={false} checklist={checklist} nested />)}
         </ExplanationSection></div>) : sections.map((section) => <ExplanationSection key={section.index}
           section={compactHeading ? { ...section, heading: "" } : section} profile={profile}
+          anchor={report && section.heading ? sectionAnchor(section.index) : undefined}
           collapse={collapsible} open={initiallyOpen.includes(section)} checklist={checklist} />)}
       </div>}
       {!!example.tokens.length && <section dir="auto" className="mb-4 text-sm leading-relaxed sm:text-[15px]">
-        <h4 className={supportLabel + " mb-1"}>{french ? "Exemple du cours" : "From your course"}</h4>
+        <h4 className="mb-2">{french ? "Exemple du cours" : "From your course"}</h4>
         <SectionText text={example} kind="example" profile={profile} checklist={checklist} />
       </section>}
       {layout.brief && sourceFooter}
@@ -414,7 +420,7 @@ function SupportingMaterial({ title, headingId, collapsed, count, children }: {
     <div className="mt-2 space-y-2">{children}</div>
   </details>
   return <section aria-labelledby={headingId} className="mb-4 space-y-2 border-t pt-3 text-sm leading-relaxed">
-    <h4 id={headingId} className={supportLabel}>{title}</h4>
+    <h4 id={headingId}>{title}</h4>
     {children}
   </section>
 }

@@ -15,6 +15,7 @@ let fonts: [string, Buffer][] | undefined
 
 type Run = { text: string; font: string; link?: string }
 type Layout = { indent: number; size: number; gap: number; prefix?: string }
+type PdfImage = { width: number; height: number; data: Buffer }
 
 function inlineLines(content: JSONContent[], origin: string, bold: boolean): Run[][] {
   const lines: Run[][] = [[]]
@@ -39,7 +40,8 @@ function inlineLines(content: JSONContent[], origin: string, bold: boolean): Run
   return lines
 }
 
-export async function notebookPdf(title: string, note: NoteDocument, origin: string): Promise<Buffer> {
+export async function notebookPdf(title: string, note: NoteDocument, origin: string,
+                                  loadImage?: (path: string) => Promise<PdfImage>): Promise<Buffer> {
   fonts ??= Object.entries(fontFiles).map(([name, file]) => [name, readFileSync(join(process.cwd(), "node_modules", file))])
   const doc = new PDFDocument({ size: "A4", margin: 46, bufferPages: true, info: { Title: title } })
   for (const [name, bytes] of fonts) doc.registerFont(name, bytes)
@@ -70,11 +72,26 @@ export async function notebookPdf(title: string, note: NoteDocument, origin: str
     doc.y += gap
   }
 
-  function render(node: JSONContent, level = 0, prefix?: string): void {
+  async function render(node: JSONContent, level = 0, prefix?: string): Promise<void> {
     const indent = Math.min(level, 20) * 12
     const children = node.content ?? []
     switch (node.type) {
       case "sourceBlock": return
+      case "image": {
+        if (!loadImage) throw new Error("Notebook image loading is unavailable.")
+        const image = await loadImage(node.attrs?.src)
+        const x = doc.page.margins.left + indent
+        const width = doc.page.width - doc.page.margins.right - x
+        const bottom = doc.page.height - doc.page.margins.bottom
+        const gap = 8
+        const scale = Math.min(1, width / image.width, (bottom - doc.page.margins.top - gap) / image.height)
+        const height = image.height * scale
+        if (doc.y + height + gap > bottom) doc.addPage()
+        const y = doc.y
+        doc.image(image.data, x, y, { width: image.width * scale, height })
+        doc.y = y + height + gap
+        return
+      }
       case "heading": {
         const depth = Number(node.attrs?.level)
         const size = depth === 1 ? 21 : depth === 2 ? 15 : 12
@@ -90,11 +107,13 @@ export async function notebookPdf(title: string, note: NoteDocument, origin: str
         for (const [index, item] of children.entries()) {
           const marker = node.type === "orderedList" ? `${(Number(node.attrs?.start) || 1) + index}. `
             : node.type === "taskList" ? item.attrs?.checked ? "☑ " : "☐ " : "• "
-          item.content?.forEach((child, position) => render(child, level + 1, position === 0 ? marker : undefined))
+          for (const [position, child] of (item.content ?? []).entries()) {
+            await render(child, level + 1, position === 0 ? marker : undefined)
+          }
         }
         return
       case "blockquote":
-        children.forEach((child) => render(child, level + 1))
+        for (const child of children) await render(child, level + 1)
         return
       case "horizontalRule": {
         const x = doc.page.margins.left + indent
@@ -107,7 +126,7 @@ export async function notebookPdf(title: string, note: NoteDocument, origin: str
           { indent, size: 10, gap: 6 })
         return
       default:
-        children.forEach((child) => render(child, level))
+        for (const child of children) await render(child, level)
     }
   }
 
@@ -115,7 +134,12 @@ export async function notebookPdf(title: string, note: NoteDocument, origin: str
   if (first?.type !== "heading" || first.attrs?.level !== 1) {
     flow([[{ text: title, font: "Note Bold" }]], { indent: 0, size: 21, gap: 6 })
   }
-  note.content.forEach((node) => render(node))
+  try {
+    for (const node of note.content) await render(node)
+  } catch (error) {
+    doc.destroy()
+    throw error
+  }
   const pages = doc.bufferedPageRange()
   for (let index = 0; index < pages.count; index++) {
     doc.switchToPage(pages.start + index)

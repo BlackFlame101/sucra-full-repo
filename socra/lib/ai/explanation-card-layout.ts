@@ -252,7 +252,7 @@ export function explanationCardLayout(explanation: PublicExplanation) {
   return {
     profile, brief, title, definition, intuition, sections, notices, example: markdown(example.body),
     citations: uniqueCardCitations(explanation.citations),
-    collapsible: profile !== "compact" && profile !== "generic" && sections.length >= 3 && (length >= 1400 || sections.length >= 5),
+    collapsible: profile === "guide" && sections.length >= 3 && (length >= 1400 || sections.length >= 5),
   }
 }
 

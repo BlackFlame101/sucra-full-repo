@@ -64,9 +64,35 @@ uv run python scripts/smoke_graph.py
 uv run python scripts/smoke_ws.py
 ```
 
+## Hosted Explainer and Notebook settings
+
+On Render, add these values in **socra-backend → Environment**:
+
+```dotenv
+EXPLAIN_FIRST_FIVE_QCM=1
+EXPLAIN_COURSE_LESSONS=1
+EXPLAIN_SPARK_REPORT=1
+```
+
+To pin the two document-generation models, optionally set `SOCRA_CHAPTER_MODEL`
+and `SOCRA_SPARK_MODEL` to `gemini-3.5-flash-lite`. Leave
+`EXPLAIN_SCOPED_SOURCES` unset for ordinary use. It enables a diagnostic scope
+report for requests outside the dedicated generation routes.
+
+The Render Blueprint uses the repository root and installs the locked Node
+dependencies so the API can extract the original PDFs. If managing the service
+directly in Render Settings, clear **Root Directory** and copy the Build and
+Start Commands from `render.yaml`. Use **Save only** for environment changes
+until the new build is ready to deploy.
+
+For Notebook screenshots, add `NOTEBOOK_IMAGE_UPLOADS=1` in the Next.js project's
+**Vercel → Settings → Environment Variables → Production** and redeploy. Its
+Supabase project needs the private `notebook-images` bucket with authenticated
+owner-folder read access.
+
 ## WebSocket protocol
 
-Endpoint: `ws://localhost:8000/ws/chat/{session_id}`
+For a frontend at `http://localhost:3000`, connect to `ws://127.0.0.1:8000/ws/chat/{session_id}`. The separate hostname keeps frontend cookies out of the WebSocket handshake.
 
 **Client → server** (one frame per student message):
 

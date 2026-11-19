@@ -3,9 +3,8 @@ services:
     name: socra-backend
     runtime: python
     plan: free
-    rootDir: socra-backend
-    buildCommand: uv sync --locked --no-dev
-    startCommand: uv run uvicorn main:app --host 0.0.0.0 --port $PORT
+    buildCommand: npm ci --prefix socra --omit=dev && cd socra-backend && uv sync --locked --no-dev
+    startCommand: cd socra-backend && uv run uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: FRONTEND_URL

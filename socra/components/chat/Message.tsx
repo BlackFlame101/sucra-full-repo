@@ -22,6 +22,8 @@ export function Message({ message, isStreaming }: MessageProps) {
     explanationPreview?: boolean
     partial?: boolean
     qcm_status?: "unreviewed" | "partial" | "failed"
+    course_lesson_status?: "unreviewed" | "partial" | "failed"
+    explain_source_manifest?: unknown
   } | undefined
   if (message.role === "assistant" && metadata?.explanation) return null
   const text = getTextContent(message)
@@ -29,7 +31,7 @@ export function Message({ message, isStreaming }: MessageProps) {
 
   if (message.role === "assistant") {
     return <TutorMessage content={text} isStreaming={isStreaming} partial={metadata?.partial}
-      explanationPreview={metadata?.explanationPreview || Boolean(metadata?.qcm_status)} />
+      explanationPreview={metadata?.explanationPreview || Boolean(metadata?.qcm_status || metadata?.explain_source_manifest || metadata?.course_lesson_status)} />
   }
   return <StudentMessage content={text} />
 }

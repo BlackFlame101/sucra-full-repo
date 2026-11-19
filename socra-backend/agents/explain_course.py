@@ -6,6 +6,102 @@ import re
 from uuid import UUID, uuid5
 
 from agents.explain_tasks import _fold
+from rag.explain_documents import ExplainSourceError, rank_reference_chunks
+
+CHAPTER_HEADING = re.compile(r"^(?:chap\.|chapitre|chapter)\s*(\d+)(?:\.\d+)*\b", re.I)
+
+
+def scoped_source_manifest(document, pages, scope, target, maps):
+    """Use exact PDF boundaries and attach the current Course Map inside them."""
+    if scope == "chapter":
+        headings = {page: match for page, text in enumerate(pages, 1)
+                    if (match := CHAPTER_HEADING.match(_fold(text.lstrip())))}
+        if not headings or {int(match[1]) for match in headings.values()} != {target}:
+            raise ExplainSourceError("Le chapitre demandé n’est pas identifié dans ce PDF.")
+        dividers = [
+            (page, label.upper())
+            for page, text in enumerate(pages, 1)
+            if page in headings
+            for label in re.findall(r"(?m)^[ \t]*partie[ \t]+(iv|iii|ii|i)[ \t]*$", _fold(text))
+        ]
+        if [number for _, number in dividers] != ["I", "II", "III", "IV"]:
+            raise ExplainSourceError("Les quatre parties du chapitre ne peuvent pas être délimitées.")
+        bounds = [(1, dividers[0][0] - 1, "Introduction")] if dividers[0][0] > 1 else []
+        bounds.extend((start, dividers[index + 1][0] - 1 if index + 1 < len(dividers) else len(pages), f"Partie {number}")
+                      for index, (start, number) in enumerate(dividers))
+        prerequisites = []
+    elif scope == "part":
+        dividers = [(page, int(match[1])) for page, text in enumerate(pages, 1)
+                    if (match := re.search(r"(?m)^\s*partie[ \t]+(\d+)[ \t]*[–—:-]", _fold(text)))]
+        candidates = [index for index, (_, number) in enumerate(dividers) if number == target]
+        if len(candidates) != 1:
+            raise ExplainSourceError("La partie demandée ne peut pas être délimitée dans ce PDF.")
+        index = candidates[0]
+        start = dividers[index][0]
+        end = dividers[index + 1][0] - 1 if index + 1 < len(dividers) else len(pages)
+        bounds = [(start, end, f"Partie {target}")]
+        prerequisites = [page for page, text in enumerate(pages[:start - 1], 1)
+                         if re.search(r"(?m)^\s*(?:etape|step)[ \t]+0\b", _fold(text))]
+    else:
+        bounds = [(1, len(pages), "TD")]
+        prerequisites = []
+
+    document_id = str(document["id"])
+    source_hash = document["content_hash"]
+    sections = [
+        row for row in maps
+        if str(row.get("document_id")) == document_id
+        and row.get("document_version", source_hash) == source_hash
+        and type(row.get("page_start")) is int and type(row.get("page_end")) is int
+        and 1 <= row["page_start"] <= row["page_end"] <= len(pages)
+        and isinstance(row.get("title"), str) and row["title"].strip()
+    ]
+    sections.sort(key=lambda row: (row["page_start"], row["page_end"], row["title"]))
+    return {
+        "document_id": document_id,
+        "source_hash": source_hash,
+        "index_version": document["index_config"],
+        "parts": [
+            {"label": label, "page_start": start, "page_end": end, "course_map": [
+                {"title": row["title"], "page_start": max(start, row["page_start"]), "page_end": min(end, row["page_end"])}
+                for row in sections if row["page_start"] <= end and start <= row["page_end"]
+            ]}
+            for start, end, label in bounds
+        ],
+        "prerequisite_pages": prerequisites,
+    }
+
+
+def exercise_reference_batches(pages, manifest, scope, references):
+    """Prepare the reference evidence without generating a Spark or TD solution."""
+    task_pages = pages[manifest["parts"][0]["page_start"] - 1:manifest["parts"][-1]["page_end"]]
+    occurrences = Counter(line for page in task_pages for line in set(page.splitlines()) if line.strip())
+    selected = "\n".join(line for page in task_pages for line in page.splitlines() if occurrences[line] < 2)
+    if scope == "part":
+        pattern = r"(?im)(?=^[ \t]*(?:étape\s+\d+|à analyser\b|exercice\s+[a-z0-9]+\b))"
+        batches = []
+        analyses = 0
+        for block in re.split(pattern, selected):
+            head = _fold(block.lstrip())
+            if step := re.match(r"etape\s+(\d+)", head):
+                batches.append((f"Étape {step[1]}", block))
+            elif head.startswith("a analyser"):
+                analyses += 1
+                batches.append((f"Analyse {analyses}", block))
+            elif exercise := re.match(r"exercice\s+([a-z0-9]+)", head):
+                batches.append((f"Exercice {exercise[1].upper()}", block))
+        if not batches:
+            batches = [("Partie", selected)]
+    else:
+        exercises = re.split(r"(?im)(?=^[ \t]*exercice\s+[a-z0-9]+\b)", selected)[1:]
+        batches = [(f"Exercice {index}", block) for index, block in enumerate(exercises, 1)] or [("TD", selected)]
+    return [{"label": label, "excerpts": [
+        {"document_id": row["document_id"], "page_number": row["page_number"], "filename": row["filename"],
+         "chunk_id": row["id"], "content": row["content"],
+         "snippet": row["content"].lstrip().split("\n", 1)[0][:110].strip()}
+        for row in sorted(rank_reference_chunks(text, references, limit=2, prefer_content=True),
+                          key=lambda row: (row["page_number"], row["document_id"]))
+    ]} for label, text in batches]
 
 
 def plan_course(document, maps, chunks, verified_index, context_tokens):

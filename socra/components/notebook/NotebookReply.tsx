@@ -7,11 +7,29 @@ import { codeCommentProse, codeLabel, guiInstructions, workflowMappingLines } fr
 import { Button } from "@/components/ui/button"
 import { lexStudyMarkdown, safeNoteLink } from "@/lib/notebook/document"
 
-export function StudyCopy({ value, label }: { value: string; label: string }) {
+export function StudyCopy({ value, label, codeLanguage }: { value: string; label: string; codeLanguage?: string }) {
   const [status, setStatus] = useState("")
   return <Button type="button" size="sm" variant="ghost" onClick={async () => {
-    try { await navigator.clipboard.writeText(value); setStatus("Copied") }
-    catch { setStatus("Copy unavailable") }
+    try {
+      if (codeLanguage !== undefined && typeof ClipboardItem !== "undefined" && navigator.clipboard.write) {
+        const pre = document.createElement("pre")
+        const code = document.createElement("code")
+        const language = codeLanguage.trim().split(/\s/)[0]
+        if (/^[\w.+-]+$/.test(language)) code.className = `language-${language}`
+        code.textContent = value
+        pre.append(code)
+        try {
+          await navigator.clipboard.write([new ClipboardItem({
+            "text/plain": new Blob([value], { type: "text/plain" }),
+            "text/html": new Blob([pre.outerHTML], { type: "text/html" }),
+          })])
+          setStatus("Copied")
+          return
+        } catch { /* Use plain text when rich clipboard writes are unavailable. */ }
+      }
+      await navigator.clipboard.writeText(value)
+      setStatus("Copied")
+    } catch { setStatus("Copy unavailable") }
   }}><span aria-live="polite">{status || label}</span></Button>
 }
 
@@ -133,7 +151,7 @@ export function StudyCode({ value, language }: { value: string; language?: strin
   }
   return <div className="min-w-0 rounded-lg border bg-muted/50">
     <div className="flex items-center justify-between gap-2 px-3 text-xs text-muted-foreground">
-      <span>{shell ? "Shell command" : codeLabel(language)}</span><StudyCopy value={value} label="Copy code" />
+      <span>{shell ? "Shell command" : codeLabel(language)}</span><StudyCopy value={value} label="Copy code" codeLanguage={language ?? ""} />
     </div>
     <pre tabIndex={0} className="overflow-x-auto whitespace-pre border-t p-3 font-mono text-sm leading-relaxed [overflow-wrap:normal] print:overflow-visible print:whitespace-pre-wrap print:[overflow-wrap:anywhere]"><code>{value}</code></pre>
   </div>
@@ -146,8 +164,8 @@ export const StudyMarkdown = memo(function StudyMarkdown({ content, tokens, pres
   return <div className="min-w-0 space-y-3 [overflow-wrap:anywhere]">{body}</div>
 })
 
-export const NotebookReply = memo(function NotebookReply({ content, streaming, partial }: {
-  content: string; streaming: boolean; partial?: boolean
+export const NotebookReply = memo(function NotebookReply({ content, streaming, partial, onInsertAtEnd }: {
+  content: string; streaming: boolean; partial?: boolean; onInsertAtEnd?: (content: string) => void
 }) {
   const [collapsed, setCollapsed] = useState(false)
   return <article className="min-w-0 space-y-2 rounded-xl border bg-card/40 px-4 py-3 sm:px-5">
@@ -158,6 +176,8 @@ export const NotebookReply = memo(function NotebookReply({ content, streaming, p
     <div hidden={collapsed} className="text-[15px] leading-relaxed"><StudyMarkdown content={content} /></div>
     {!streaming && <div className="flex flex-wrap items-center gap-1">
       <StudyCopy value={content} label="Copy response" />
+      {!partial && onInsertAtEnd && <Button type="button" size="sm" variant="ghost"
+        onClick={() => onInsertAtEnd(content)}>Insert at end</Button>}
       {content.length > 1800 && <Button size="sm" variant="ghost" aria-expanded={!collapsed} onClick={() => setCollapsed(!collapsed)}>{collapsed ? "Expand response" : "Collapse response"}</Button>}
     </div>}
   </article>

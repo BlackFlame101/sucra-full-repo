@@ -103,6 +103,12 @@ class SocraState(TypedDict, total=False):
     qcm_result: str
     qcm_status: Literal["unreviewed", "partial", "failed"]
     qcm_preview: Callable[[str], Awaitable[None]]
+    course_lesson_text: str
+    course_lesson_status: Literal["unreviewed", "partial", "failed"]
+    explain_source_manifest: dict[str, Any]
+    explain_manifest_text: str
+    explain_reference_batches: list[dict[str, Any]]
+    explain_sources: dict[str, Any]
     preview: Callable[[str | None], Awaitable[None]]
     tutor_delta: Callable[[str], Awaitable[None]]
     emit_diagnostic: Callable[[DiagnosticReport], Awaitable[None]]
@@ -116,6 +122,7 @@ class SocraState(TypedDict, total=False):
     provider: str
     language: str
     explain_language_explicit: bool
+    explain_format: Literal["focused", "full_document"]
     explain_document_id: str
     explain_course_prior: dict
     explain_inventory: dict[str, Any]

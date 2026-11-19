@@ -387,6 +387,20 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                 await emit("error", "The Notebook selection or context is unavailable. Save the note and try again.")
                 return
         fingerprint_fields = [action, requested_mode, exercise_id, student_message, attempt_request.hints_used if attempt_request else 0]
+        document_id = None
+        explain_format = payload.get("explainFormat")
+        if explain_format is not None:
+            if requested_mode != "explain" or context or explain_format not in ("focused", "full_document"):
+                await emit("error", "Choose a valid explanation format.")
+                return
+            fingerprint_fields.extend(["explain_format", explain_format])
+        if requested_mode == "explain" and payload.get("documentId") is not None:
+            try:
+                document_id = str(UUID(str(payload["documentId"])))
+            except ValueError:
+                await emit("error", "Choose a valid PDF for this inquiry.")
+                return
+            fingerprint_fields.extend(["document", document_id])
         prior_course = None
         if payload.get("continueCourseFrom") is not None:
             from agents.explain_tasks import explain_flag
@@ -401,6 +415,8 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
                     for row in (previous or {}).get("request_messages", []) if row["role"] == "assistant"
                 )
                 if not prior_course or prior_course.get("next_request_id") != current_request:
+                    raise ValueError
+                if document_id and document_id != prior_course.get("document_id"):
                     raise ValueError
             except (ValueError, StopIteration):
                 await emit("error", "Open the saved course part in this inquiry to continue.")
@@ -528,12 +544,10 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
         if prior_course:
             initial_state["explain_course_prior"] = prior_course
         initial_state["explain_language_explicit"] = payload.get("language") in ("fr", "en")
-        if requested_mode == "explain" and payload.get("documentId") is not None:
-            try:
-                initial_state["explain_document_id"] = str(UUID(str(payload["documentId"])))
-            except ValueError:
-                await emit("error", "Choose a valid PDF for this inquiry.")
-                return
+        if explain_format:
+            initial_state["explain_format"] = explain_format
+        if document_id:
+            initial_state["explain_document_id"] = document_id
         if context:
             initial_state["notebook_context"] = context
             initial_state["notebook_action"] = note_action
@@ -676,6 +690,17 @@ async def chat_ws(ws: WebSocket, session_id: str) -> None:
             elif final_state.get("qcm_result"):
                 text = final_state["qcm_result"]
                 metadata["qcm_status"] = final_state["qcm_status"]
+                if sources := final_state.get("explain_sources"):
+                    metadata["explain_sources"] = sources
+            elif final_state.get("course_lesson_text"):
+                text = final_state["course_lesson_text"]
+                metadata["course_lesson_status"] = final_state["course_lesson_status"]
+                if sources := final_state.get("explain_sources"):
+                    metadata["explain_sources"] = sources
+            elif final_state.get("explain_manifest_text"):
+                text = final_state["explain_manifest_text"]
+                if manifest := final_state.get("explain_source_manifest"):
+                    metadata["explain_source_manifest"] = manifest
             else:
                 await emit("error", "The tutor returned an empty response. Try again.")
                 return

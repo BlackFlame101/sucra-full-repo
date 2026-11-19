@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from rag.qcm_inventory import ALL_QUESTIONS, FIRST_FIVE
 
@@ -59,8 +59,8 @@ _SOLVE = (
 _GRADED_SOLVE = r"\b(?:answer|solve|reponds?|repondre|حل)\s+(?:(?:all|each|the|aux|a|les|toutes les|كل)\s+)*(?:questions?|الاسئلة|السوال)\b"
 _QCM = re.compile(r"\b(?:qcm|quiz a choix multiples|multiple[ -]choice)\b")
 _QCM_SOLVE = re.compile(
-    r"\b(?:solve|answer|give (?:me )?the answers|resous|corrige|reponds?|"
-    r"donne (?:moi )?les reponses)\b"
+    r"\b(?:solve|solved|answer|answered|answers|justify|resous|resoudre|corrige|reponds?|repondre|"
+    r"reponses|justifie|justifier)\b"
 )
 _QCM_FIRST_FIVE = re.compile(
     r"\b(?:(?:the )?first (?:five|5) (?:qcm |multiple[ -]choice )?questions?|"
@@ -125,15 +125,20 @@ def _language(text: str, configured: str | None, explicit_setting: bool) -> str:
     return fallback or "English"
 
 
-def is_qcm_solve_request(message: str) -> bool:
-    text = _fold(message)
-    return bool(_QCM.search(text) and not _has(_GUIDANCE, text) and any(
+def _requests_question_answers(text: str) -> bool:
+    return bool(_has(r"\b(?:questions?|answers|reponses)\b", text) and _qcm_solve_action(text))
+
+
+def _qcm_solve_action(text: str) -> bool:
+    if _has(r"\b(?:do not|don't|never)\s+(?:give|solve|answer|justify)\b"
+            r"|\bne\s+(?:reponds|resous|corrige|justifie)\s+pas\b", text):
+        return False
+    return bool(not _has(_GUIDANCE, text) and any(
         not _has(_NEGATED, text[:match.start()]) for match in _QCM_SOLVE.finditer(text)
     ))
 
 
-def requested_qcm_ordinals(message: str) -> tuple[int, ...]:
-    text = _fold(message)
+def _qcm_ordinals(text: str) -> tuple[int, ...]:
     if _has(r"\b(?:except|exclude|excluding|skip|omit|sauf|hors|exclure|omets)\b", text):
         return ()
     scope = _QCM_RANGE.search(text) or _QCM_FIRST_FIVE.search(text)
@@ -149,15 +154,15 @@ def requested_qcm_ordinals(message: str) -> tuple[int, ...]:
         remainder = _QCM_ALL.sub("", text)
         if not _has(r"\b\d+\s+(?:qcm )?questions?\b", remainder):
             return ALL_QUESTIONS
-    return ()
+    if _has(r"\b(?:q\s*\d+|questions?\s+\d+|\d+\s+questions?)\b", text):
+        return ()
+    return ALL_QUESTIONS
 
 
-def classify_explain_task(
-    message: str, configured_language: str | None, explicit_language: bool,
+def _task_profile(
+    message: str, text: str, language: str,
     short_style: bool, exercise_numbers: list[str], explicit_exercise: bool,
 ) -> ExplainTask:
-    text = _fold(message)
-    language = _language(text, configured_language, explicit_language)
     breadth = _has(_BREADTH, text)
     procedural = _has(_PROCEDURE, text)
     coding = _has(_CODING, text)
@@ -191,6 +196,217 @@ def classify_explain_task(
     if coding:
         return ExplainTask("coding_guide", detail, "code", language)
     return ExplainTask("concept_explanation", detail, "general", language)
+
+
+@dataclass(frozen=True)
+class IntentProfile:
+    intent: str
+    level: str
+    scope: str
+    document_kind: str
+    language: str
+    requested_format: str | None
+    max_points: int | None
+    max_sentences: int | None
+    examples: bool
+    formulas: bool
+    executable_code: bool
+    every_chapter: bool
+    practice: str | None
+
+
+_NUMBERS = dict(zip("one two three four five six une un deux trois quatre cinq six".split(),
+                    (1, 2, 3, 4, 5, 6, 1, 1, 2, 3, 4, 5, 6)))
+
+
+def _adaptive_profile(message, query, language, explicit_language, source_names):
+    # Scope and depth exclusions are frequently appended to a positive request.
+    positive = re.split(r"\b(?:ne developpe|sans entrer|do not expand|without going)\b", query)[0]
+
+    def has(pattern):
+        return bool(re.search(pattern, positive))
+
+    def limit(unit):
+        match = re.search(
+            rf"(?:maximum|au plus|up to|at most|no more than|en|in)\s+(\d{{1,2}}|{'|'.join(_NUMBERS)})\s+(?:{unit})\b",
+            positive,
+        )
+        if not match:
+            return None
+        value = match[1]
+        return int(value) if value.isdecimal() else _NUMBERS[value]
+
+    beginner = has(r"\b(?:aucune connaissance|debutant\w*|from scratch|beginner\w*|no prior knowledge|مبتدئ)\b")
+    level = ("beginner" if beginner else "intermediate" if has(r"\bintermedia(?:ire|te)\b")
+             else "advanced" if has(r"\b(?:advanced level|niveau avance)\b") else "unspecified")
+    whole = has(r"\b(?:tous les chapitres|toutes les sections|integralite|sans rien oublier|entire (?:course|document|pdf)|whole (?:course|document|pdf)|full course|all (?:chapters|sections)|كامل الدرس)\b")
+    names = _fold(" ".join(source_names)).replace("_", " ").replace("-", " ")
+    kinds = {
+        "lab": r"\b(?:tp\d*|travaux pratiques|lab\d*|practical assignment)\b",
+        "exercise_sheet": r"\b(?:td\d*|fiche d.exercices|exercise sheet)\b",
+        "research_paper": r"\b(?:research paper|article scientifique|arxiv)\b",
+        "lecture": r"\b(?:cours|chapitre\d*|lecture|course)\b",
+        "reference_document": r"\b(?:manual|manuel|reference|documentation)\b",
+    }
+    matches = [kind for kind, pattern in kinds.items() if re.search(pattern, names)]
+    kind = matches[0] if len(matches) == 1 else "unknown"
+    points = limit(r"points?|bullets?")
+    sentences = 1 if _ONE_SENTENCE.search(query) else limit(r"sentences?|phrases?")
+    lab = has(r"\b(?:tp\d*|travaux pratiques|lab|practical assignment|capture d.ecran|screenshots?)\b")
+    procedure = has(r"\b(?:walkthrough|walk me through|step.by.step|etape par etape|installer|installation|commandes?|commands?|complete|realiser|faire)\b")
+    exercise = has(r"\b(?:solve|resous|resoudre|corrige|indices|hints?|aide|help|solution)\b[^.!?]{0,65}\b(?:exercices?|exercises?)\b")
+    revision = has(r"\b(?:fiche(?:s)? (?:de revision|memo)|study (?:sheet|guide)|revision sheet|exam prep|preparer (?:un|l.) examen|ملخص للمراجعة)\b")
+    summary_excluded = has(r"\b(?:no summary|do not summari[sz]e|without (?:a )?summary|sans resum[em]|ne (?:le )?resume pas)\b")
+    summary = not summary_excluded and (
+        sentences is not None or is_brief_request(message)
+        or has(r"\b(?:resume|summari[sz]e|summary|تلخيص|لخص|ملخص)\b")
+    )
+    intent = ("revision_sheet" if revision else "summary" if summary else
+              "lab_walkthrough" if procedure and (lab or kind == "lab") and kind not in {"lecture", "research_paper"}
+              else "exercise_help" if exercise else "full_course" if whole else
+              "beginner" if beginner else "standard")
+    explicit = re.search(r"\b(?:in|en) (english|french|arabic|anglais|francais|arabe)\b", query)
+    preferred = _language("en " + explicit[1], language, True) if explicit else _language(query, language, explicit_language)
+    return IntentProfile(
+        intent, level, "whole_document" if whole else "broad" if has(r"\b(?:cours|course|notions principales|main concepts)\b") else "focused",
+        kind, preferred, "sheet" if revision else "bullets" if points is not None else None,
+        points, sentences, has(r"\b(?:exemples?|examples?)\b"), has(r"\b(?:formules?|formulas?)\b"),
+        has(r"\b(?:code executable|executable code|runnable|ecris (?:le|du) code|write (?:the |some )?code|commands?|commandes?)\b"),
+        whole, "guided" if has(r"\b(?:hints?|indices|sans resoudre|sans donner la reponse)\b") else "answers" if exercise else None,
+    )
+
+
+@dataclass(frozen=True)
+class ExplainRequest:
+    action: str
+    depth: str
+    scope: str
+    task: ExplainTask
+    intent: IntentProfile
+    target: int | None = None
+    qcm_ordinals: tuple[int, ...] = ()
+    closing_recap: bool = False
+
+
+def resolve_explain_request(
+    message: str, language: str | None = None, explicit_language: bool = False, *,
+    source_names=(), short_style: bool = False, exercise_numbers=(), explicit_exercise: bool = False,
+    format_override: str | None = None,
+) -> ExplainRequest:
+    text = _fold(message).replace("’", "'")
+    recap = re.search(
+        r"(?:\band |\bthen |\bet |\bpuis |[.!?]\s+)(?:(?:at the end|a la fin)\b|(?:end|finish|conclude) with\b|termine(?:r)? par\b)"
+        r"[^.!?]*\b(?:summary|recap|tldr|tl;dr|resume|recapitulatif|synthese)\b", text,
+    )
+    main_prompt = message[:recap.start()] if recap else message
+    main_text = _fold(main_prompt).replace("’", "'")
+    intent = _adaptive_profile(main_prompt, main_text, language, explicit_language, source_names)
+    if recap:
+        intent = replace(intent, language=_adaptive_profile(message, text, language, explicit_language, source_names).language)
+    task = _task_profile(main_prompt, main_text, intent.language, short_style and not recap, exercise_numbers, explicit_exercise)
+    exhaustive = intent.every_chapter or _has(
+        r"\b(?:exhaustiv\w*|sans (?:rien omettre|omettre de section)|without (?:skipping|omitting) any section)\b", text,
+    )
+    detail = "exhaustive" if exhaustive else "detailed" if _DETAIL.search(text) else task.detail_level
+    if _QCM.search(text) and _qcm_solve_action(text):
+        return ExplainRequest("solve", detail, "qcm", task, intent, qcm_ordinals=_qcm_ordinals(text))
+    boundary = re.search(r"\b(partie|part|chapitre|chapter)\s+(\d{1,3})(?!\d|[.]\d)\b", text)
+    explanatory = _has(r"\b(?:explain\w*|explanation\w*|explication\w*|explique\w*)\b", text)
+    chapter_scope = bool(boundary and boundary[1] in {"chapitre", "chapter"})
+    chapter_explanation = chapter_scope and explanatory
+    source_scope = chapter_scope or _has(
+        r"\b(?:cours|course|chapitre|chapter|document|pdf|lecture|everything|tout|all of (?:it|this)|this|ceci)\b"
+        r"|\b(?:explain it|explique-le)\b|\b(?:fully explain|explain fully)[.!?\s]*$", text,
+    )
+    negated = _has(
+        r"\b(?:do not|don['’]t|no need to)\s+(?:(?:fully|completely)\s+)?explain\b"
+        r"|\bne\s+(?:m['’])?explique\w*\s+pas\b", text,
+    )
+    limited = _has(
+        r"\b(?:only|just|uniquement|seulement)\s+(?:section|the main|les points)\b"
+        r"|\bsections?\s+\d+\b", text,
+    )
+    explicit_complete = explanatory and source_scope and not negated and not limited and _has(
+        r"\b(?:fully|completely|everything|entire|whole|exhaustiv\w*|integral\w*|entier\w*|complet\w*)\b"
+        r"|\b(?:full explanation|tout le cours|tout expliquer|explique(?:-moi)? tout|toutes les sections|"
+        r"explain all of (?:it|this)|all (?:pages|sections|topics)|every (?:page|section|topic)|"
+        r"sans rien (?:omettre|oublier)|de bout en bout)\b", text,
+    )
+    if explicit_complete and intent.intent not in {"summary", "revision_sheet", "lab_walkthrough", "exercise_help"}:
+        exhaustive = True
+        detail = "exhaustive"
+        intent = replace(intent, intent="full_course", scope="chapter" if chapter_scope else "whole_document",
+                         every_chapter=True)
+    elif negated and intent.scope == "whole_document" and intent.intent == "full_course":
+        intent = replace(intent, intent="standard", scope="focused", every_chapter=False)
+        exhaustive = False
+        detail = task.detail_level
+    action = re.match(r"^\s*(?:please |s'il te plait,? )?(resous|resoudre|solve|explique|explain)\b", text)
+    part_solve = re.search(
+        r"^\s*(?:(?:please|stp|s'il te plait),?\s+|(?:peux-tu|pourrais-tu|can you|could you|i want you to)\s+)?"
+        r"(?:resous|resoudre|solve|work through|work out|answer|corrige|corriger|traite|traiter|fais|complete)\b", text,
+    )
+    if boundary and part_solve and not _has(_GUIDANCE, text) and not _has(
+        r"\b(?:sauf|hors|exclure|except|excluding|skip)\b", text,
+    ):
+        kind, number = boundary.groups()
+        if kind in {"partie", "part"}:
+            return ExplainRequest("solve", detail, "part", task, intent, int(number))
+    if chapter_scope and not negated and not limited and (
+        intent.intent in {"summary", "revision_sheet", "beginner", "full_course"}
+        or chapter_explanation
+        or (action and action[1] in {"explique", "explain"})
+    ):
+        if format_override == "focused":
+            return ExplainRequest("explain", "standard", "focused", task,
+                                  replace(intent, intent="standard", scope="focused", every_chapter=False))
+        if format_override == "full_document":
+            intent = replace(intent, intent="full_course", scope="chapter", every_chapter=True)
+            detail = "exhaustive"
+        return ExplainRequest("summarize" if intent.intent == "summary" and not exhaustive and format_override != "full_document" else "explain",
+                              detail, "chapter", task, intent, int(boundary[2]), closing_recap=bool(recap))
+    if (action and action[1] in {"resous", "resoudre", "solve"} and not _has(_GUIDANCE, text)
+            and (_has(r"\b(?:td|travaux diriges|exercise sheet)\b", text)
+                 or intent.document_kind == "exercise_sheet")):
+        return ExplainRequest("solve", detail, "td", task, intent)
+    if _requests_question_answers(text):
+        return ExplainRequest("solve", detail, "question_answers", task, intent, qcm_ordinals=_qcm_ordinals(text))
+    if format_override == "full_document":
+        return ExplainRequest("explain", "exhaustive", "whole_document", task,
+                              replace(intent, intent="full_course", scope="whole_document", every_chapter=True),
+                              closing_recap=bool(recap))
+    if format_override == "focused":
+        return ExplainRequest("explain", "standard", "focused", task,
+                              replace(intent, intent="standard", scope="focused", every_chapter=False))
+    action_name = {
+        "summary": "summarize", "lab_walkthrough": "guide", "exercise_help": "guide",
+    }.get(intent.intent, "solve" if task.worked_solutions else "explain")
+    return ExplainRequest(action_name, detail, intent.scope, task, intent, closing_recap=bool(recap))
+
+
+def explain_model_for_scope(scope: str, selected: str | None) -> str | None:
+    variable = {"qcm": "SOCRA_QCM_MODEL", "chapter": "SOCRA_CHAPTER_MODEL",
+                "part": "SOCRA_SPARK_MODEL", "td": "SOCRA_TD_MODEL"}.get(scope)
+    configured = os.getenv(variable, "").strip() if variable else ""
+    return (selected or configured or None) if scope == "qcm" else (configured or selected)
+
+
+def is_qcm_solve_request(message: str) -> bool:
+    return resolve_explain_request(message).scope == "qcm"
+
+
+def requested_qcm_ordinals(message: str) -> tuple[int, ...]:
+    return _qcm_ordinals(_fold(message))
+
+
+def classify_explain_task(
+    message: str, configured_language: str | None, explicit_language: bool,
+    short_style: bool, exercise_numbers: list[str], explicit_exercise: bool,
+) -> ExplainTask:
+    return resolve_explain_request(
+        message, configured_language, explicit_language, short_style=short_style,
+        exercise_numbers=exercise_numbers, explicit_exercise=explicit_exercise,
+    ).task
 
 
 _SOLVE_MODES = {"solve_single_exercise", "solve_multiple_exercises"}

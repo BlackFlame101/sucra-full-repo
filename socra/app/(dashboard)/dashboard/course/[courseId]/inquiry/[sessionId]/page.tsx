@@ -23,7 +23,7 @@ import type { CourseContextMaterial } from "@/components/context-panel/ContextPa
 import { toast } from "sonner"
 import type { Course, Session } from "@/types"
 import type { UIMessage } from "ai"
-import type { LearningMode, PublicCorrection, PublicExercise, PublicSolution } from "@/lib/socra-ws"
+import type { ExplainFormat, LearningMode, PublicCorrection, PublicExercise, PublicSolution } from "@/lib/socra-ws"
 import type { PublicExplanation } from "@/lib/socra-ws"
 
 const ChatPanel = lazy(() =>
@@ -127,6 +127,15 @@ export default function InquiryPage() {
   const [keyTerms, setKeyTerms] = useState<string[]>([])
   const [suggestedReadings, setSuggestedReadings] = useState<ContextPanelReading[]>([])
   const [courseMaterials, setCourseMaterials] = useState<CourseContextMaterial[]>([])
+  const [selectedPdfId, setSelectedPdfId] = useState(() => searchParams.get("pdf") ?? "")
+  const [explainFormat, setExplainFormat] = useState<ExplainFormat | undefined>(() => {
+    const format = searchParams.get("explainFormat")
+    return format === "focused" || format === "full_document" ? format : undefined
+  })
+  const explainPdfs = notebookId ? [] : courseMaterials
+    .filter((material) => material.indexStatus === "ready")
+    .map(({ documentId, filename }) => ({ id: documentId, filename }))
+  const explainPdfId = explainPdfs.some(({ id }) => id === selectedPdfId) ? selectedPdfId : ""
   const [contextLoading, setContextLoading] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [apiKeyIssue, setApiKeyIssue] = useState<{ code: string; message: string } | null>(null)
@@ -398,7 +407,8 @@ export default function InquiryPage() {
       setCorrection(null)
       setSolution(null)
     }
-    sendMessage({ text, mode: learningMode, ...(notebookId ? { notebook: { id: notebookId, action: learningMode === "exercise" ? "quiz" : "ask" } as const } : {}) })
+    sendMessage({ text, mode: learningMode, documentId: explainPdfId, explainFormat,
+      ...(notebookId ? { notebook: { id: notebookId, action: learningMode === "exercise" ? "quiz" : "ask" } as const } : {}) })
   }
 
   const handleLanguageChange = async (nextLanguage: "fr" | "en") => {
@@ -639,6 +649,11 @@ export default function InquiryPage() {
             onAttach={() => setUploadOpen(true)}
             learningMode={learningMode}
             onLearningModeChange={handleLearningModeChange}
+            explainPdfs={explainPdfs}
+            explainPdfId={explainPdfId}
+            explainFormat={explainFormat}
+            onExplainFormatChange={notebookId ? undefined : setExplainFormat}
+            onExplainPdfChange={setSelectedPdfId}
             exercise={exercise}
             onNextExercise={handleNextExercise}
             onSubmitAttempt={handleSubmitAttempt}

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import unicodedata
 from collections import Counter
@@ -10,10 +11,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from db.supabase_client import get_supabase
-from rag.qcm_inventory import QcmInventory, QcmSourceError, build_qcm_inventory
+from rag.qcm_inventory import QcmInventory, build_qcm_inventory
 
 _MAX_CHUNKS = 500
 _MAX_DOCUMENTS = 256
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,16 @@ class DocumentSelection:
     document: dict[str, Any] | None
     reason: str
     document_ids: tuple[str, ...] = ()
+
+
+class ExplainSourceError(ValueError):
+    """The selected indexed PDF cannot establish the requested source."""
+
+
+@dataclass(frozen=True)
+class ExplainSources:
+    task_source: dict
+    reference_sources: tuple[dict, ...]
 
 
 async def course_documents(course_id: str, owner_id: str) -> list[dict]:
@@ -39,24 +51,45 @@ async def course_documents(course_id: str, owner_id: str) -> list[dict]:
     return await asyncio.to_thread(read)
 
 
-async def load_qcm_inventory(document: dict, owner_id: str, ordinals: tuple[int, ...]) -> QcmInventory:
+async def load_owned_explain_pages(document: dict, owner_id: str) -> list[str]:
     """Reuse the indexing extractor and verify the bytes against the selected index."""
     from worker import download_document, extract_pages, InvalidDocument
 
     source_hash = document.get("content_hash")
     index_version = document.get("index_config")
     if not source_hash or not index_version:
-        raise QcmSourceError("La version indexée du PDF est indisponible.")
+        raise ExplainSourceError("La version indexée du PDF est indisponible.")
     try:
         data = await download_document(document, owner_id)
         if hashlib.sha256(data).hexdigest() != source_hash:
-            raise QcmSourceError("Le PDF a changé depuis son indexation.")
+            raise ExplainSourceError("Le PDF a changé depuis son indexation.")
         pages = await extract_pages(data)
     except InvalidDocument as exc:
-        raise QcmSourceError("Le texte du PDF source n’a pas pu être vérifié.") from exc
+        raise ExplainSourceError("Le texte du PDF source n’a pas pu être vérifié.") from exc
     if len(pages) != document.get("page_count"):
-        raise QcmSourceError("Le nombre de pages diffère de la version indexée.")
-    return build_qcm_inventory(pages, str(document["id"]), source_hash, index_version, ordinals)
+        raise ExplainSourceError("Le nombre de pages diffère de la version indexée.")
+    return pages
+
+
+async def load_explain_course_map(document: dict) -> list[dict]:
+    """Read the same current-version section rows as the course context panel."""
+    def read():
+        return (get_supabase().table("document_summaries")
+                .select("document_id,document_version,title,page_start,page_end")
+                .eq("course_id", document["course_id"]).eq("document_id", document["id"])
+                .eq("document_version", document["content_hash"]).eq("level", "section")
+                .order("page_start").order("section_index").execute().data or [])
+
+    try:
+        return await asyncio.to_thread(read)
+    except Exception as exc:
+        logger.info("explain_course_map_unavailable error_type=%s", type(exc).__name__)
+        return []
+
+
+async def load_qcm_inventory(document: dict, owner_id: str, ordinals: tuple[int, ...]) -> QcmInventory:
+    pages = await load_owned_explain_pages(document, owner_id)
+    return build_qcm_inventory(pages, str(document["id"]), document["content_hash"], document["index_config"], ordinals)
 
 
 def _fold(value: str) -> str:
@@ -119,6 +152,104 @@ def select_document(documents: list[dict], topic: str, chunks: list[dict], expli
         if count / counts.total() >= threshold:
             return DocumentSelection(by_id[document_id], "dominant_retrieval", (document_id,))
     raise ValueError("Which PDF should Explain use? Name a file in this course or ask to compare the documents.")
+
+
+def resolve_explain_sources(documents: list[dict], topic: str, explicit_id: str | None) -> ExplainSources:
+    text = _fold(topic).replace("’", "'")
+    task_text, *reference_text = re.split(
+        r"\b(?:en utilisant|en t'appuyant sur|en s'appuyant sur|a l'aide d[eu]|avec (?:le |les )?cours|"
+        r"using|based on|references?\s*:)\s*", text, maxsplit=1,
+    )
+    selected = select_document(documents, "", [], explicit_id, .7).document if explicit_id else None
+
+    def named_in(value):
+        found = []
+        for doc in documents:
+            filename = _fold(doc.get("filename") or "")
+            stem = filename.removesuffix(".pdf")
+            if filename and (
+                re.search(r"(?<![\w.-])" + re.escape(filename) + r"(?![\w-]|\.[\w-])", value)
+                or len(stem) >= 3 and re.search(r"[\"“«]\s*" + re.escape(stem) + r"\s*[\"”»]", value)
+            ):
+                found.append(doc)
+        if len({_fold(doc.get("filename") or "") for doc in found}) != len(found):
+            raise ExplainSourceError("Plusieurs PDF ont le même nom. Choisissez le document par son identifiant.")
+        return found
+
+    tasks = named_in(task_text)
+    if len(tasks) > 1 or (not tasks and re.search(r"\.pdf\b", task_text)):
+        raise ExplainSourceError("Identifiez un seul PDF de travail indexé.")
+    no_refs = bool(re.search(r"\b(?:sans (?:utiliser |consulter )?(?:d'autres |les )?(?:references?|autres pdf)|without (?:any )?references?)\b", text))
+    refs = [] if no_refs or not reference_text else named_in(reference_text[0])
+    if reference_text and re.search(r"\.pdf\b", reference_text[0]) and not refs and not no_refs:
+        raise ExplainSourceError("Le PDF de référence demandé est indisponible dans ce cours.")
+    reference_ids = {str(doc["id"]) for doc in refs}
+    if not tasks and not selected:
+        candidates = [doc for doc in documents if str(doc["id"]) not in reference_ids]
+        if len(candidates) != 1:
+            raise ExplainSourceError("Sélectionnez un seul PDF indexé ou indiquez son nom exact.")
+        selected = candidates[0]
+    task = tasks[0] if tasks else selected
+    task_id = str(task["id"])
+    if task_id in reference_ids:
+        raise ExplainSourceError("Choisissez des PDF de travail et de référence distincts.")
+    return ExplainSources(task, tuple(doc for doc in (() if no_refs else refs or documents) if str(doc["id"]) != task_id))
+
+
+async def load_reference_chunks(course_id: str, owner_id: str, documents: tuple[dict, ...]) -> list[dict]:
+    references = []
+    for document in documents:
+        try:
+            chunks, scope = await document_inventory_chunks(course_id, owner_id, document, [])
+        except Exception as exc:
+            logger.info("explain_reference_unavailable error_type=%s", type(exc).__name__)
+            continue
+        if scope == "full_document":
+            references.extend({**row, "filename": document["filename"]} for row in chunks)
+    return references
+
+
+def rank_reference_chunks(text: str, chunks: list[dict], limit: int = 6, *, prefer_content: bool = False) -> list[dict]:
+    def terms(value):
+        folded = _fold(value)
+        words = set(re.findall(r"[^\W_]{4,}", folded)) - {
+            "avec", "dans", "cette", "choix", "comme", "cours", "faire", "leur", "leurs", "mais",
+            "nous", "pour", "quand", "quelle", "quelles", "sont", "tout", "tous", "which", "with",
+        }
+        if prefer_content:
+            words -= {
+                "spark", "mllib", "sbihi", "processus", "decisionnel", "etape", "exercice", "analyser",
+                "pourquoi", "comment", "utiliser", "generer", "realiser", "faire", "plutot", "suivant",
+                "resultats", "choisir", "permet", "doit", "faut",
+            }
+            words.update(re.findall(r"\b(?:sql|auc|f1|csv|rdd|api)\b", folded))
+        return words
+    wanted = terms(text)
+    heading_terms = terms(text.lstrip().split("\n", 1)[0]) if prefer_content else set()
+    if not wanted:
+        return []
+    matches = []
+    for chunk in chunks:
+        content = chunk["content"].strip()
+        title = content.split("\n", 1)[0]
+        shared = terms(content) & wanted
+        title_matches = terms(title) & wanted
+        front_matter = bool(re.match(r"^(?:plan du cours|table des matieres|sommaire|objectifs|course outline)\b", _fold(title)))
+        opening_page = 1 <= chunk["page_number"] <= 3
+        if prefer_content and (front_matter or opening_page) and len(title_matches & heading_terms) < 3:
+            continue
+        if shared and (not prefer_content or len(shared) >= 2):
+            matches.append((chunk, shared, title_matches))
+    frequencies = Counter(term for _, shared, _ in matches for term in shared)
+    matches.sort(key=lambda item: -(sum(1 / frequencies[term] for term in item[1])
+                                    + (sum(1 / frequencies[term] for term in item[2]) if prefer_content else 0)
+                                    + sum(2 / frequencies[term] for term in item[1] & heading_terms)))
+    by_page = {}
+    for chunk, _, _ in matches:
+        if len(by_page) == limit:
+            break
+        by_page.setdefault((chunk["document_id"], chunk["page_number"]), chunk)
+    return list(by_page.values())
 
 
 def complete_index(chunks: list[dict], document: dict, expected_count: int | None = None) -> bool:

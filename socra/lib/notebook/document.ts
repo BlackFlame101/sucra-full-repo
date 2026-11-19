@@ -20,8 +20,9 @@ const markdown = new Marked({
     name: "inlineMath", level: "inline",
     start: (src) => { const at = src.search(/\$|\\\(/); return at < 0 ? undefined : at },
     tokenizer(src) {
-      const match = /^(?:\$(?!\s|\$)([^$\n]+?)\$|\\\((.+?)\\\))/.exec(src)
-      if (match) return { type: "inlineMath", raw: match[0], latex: (match[1] ?? match[2]).trim() }
+      const match = /^(?:\$(?!\$)([^$\n]+?)\$(?!\$)|\\\((.+?)\\\))/.exec(src)
+      const latex = (match?.[1] ?? match?.[2])?.trim()
+      if (match && latex) return { type: "inlineMath", raw: match[0], latex }
     },
   }],
 })
@@ -57,12 +58,14 @@ function blocks(tokens: Token[]): JSONContent[] {
       case "blockMath": return [{ type: t.type, attrs: { latex: (t as MathToken).latex } }]
       case "blockquote": return [{ type: "blockquote", content: blocks(t.tokens ?? []) }]
       case "table": {
-        // Notebook has no editable table node. Keep the Markdown rows copyable
-        // using the editor's existing hard breaks instead of collapsed whitespace.
-        const rows = t.raw.replace(/\n+$/, "").split("\n")
-        return [{ type: "paragraph", content: rows.flatMap((row: string, index: number) => [
-          ...(index ? [{ type: "hardBreak" }] : []), ...textNode(row),
-        ]) }]
+        const { header, rows } = token as Tokens.Table
+        return [{ type: "table", content: [header, ...rows].map((row, index) => ({
+          type: "tableRow",
+          content: row.map((cell) => ({
+            type: index === 0 ? "tableHeader" : "tableCell",
+            content: [{ type: "paragraph", content: inline(cell.tokens) }],
+          })),
+        })) }]
       }
       case "list": {
         const items = t.items as Tokens.ListItem[]
@@ -96,12 +99,26 @@ export function suggestionNote(value: string): NoteDocument {
   return markdownNote(wrapped?.[2] ?? value)
 }
 
+export function fencedMarkdownPaste(value: string): NoteDocument | null {
+  if (!/^[ \t]*(?:`{3,}|~{3,})[^\r\n]*\r?$/m.test(value)) return null
+  const tokens = lexStudyMarkdown(value)
+  // Fenced blocks may be inside a numbered list, as with Socra's command examples.
+  const hasFence = (items: Token[]): boolean => items.some((item) => {
+    const token = item as Tokens.Generic
+    if (token.type === "code") return /^ {0,3}(?:`{3,}|~{3,})/.test(token.raw)
+    if (token.type === "list") return (token.items as Tokens.ListItem[]).some((entry) => hasFence(entry.tokens))
+    return token.type === "blockquote" && hasFence(token.tokens ?? [])
+  })
+  return hasFence(tokens) ? { type: "doc", content: blocks(tokens) } : null
+}
+
 export function noteText(node: JSONContent): string {
   if (node.type === "sourceBlock") return ""
   if (node.type === "hardBreak") return "\n"
   if (node.type === "inlineMath" || node.type === "blockMath") return node.attrs?.latex ?? ""
   if (node.text) return node.text
-  const separator = ["paragraph", "heading", "codeBlock"].includes(node.type ?? "") ? "" : "\n"
+  const separator = node.type === "tableRow" ? "\t" :
+    ["paragraph", "heading", "codeBlock"].includes(node.type ?? "") ? "" : "\n"
   return node.content?.map(noteText).join(separator) ?? ""
 }
 

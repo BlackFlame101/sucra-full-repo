@@ -55,10 +55,10 @@ async def download_document(document: dict, owner: str) -> bytes:
     return data
 
 
-async def extract_pages(data: bytes, *, allow_scanned: bool = False) -> list[str]:
-    def extract() -> list[str]:
+async def _extract_pdf(data: bytes, *options: str) -> list:
+    def extract() -> list:
         result = subprocess.run(
-            [os.environ.get("SOCRA_NODE_BIN", "node"), "--max-old-space-size=384", str(PDF_EXTRACTOR)],
+            [os.environ.get("SOCRA_NODE_BIN", "node"), "--max-old-space-size=384", str(PDF_EXTRACTOR), *options],
             input=data, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45, check=False,
         )
         if result.returncode == 2:
@@ -69,10 +69,18 @@ async def extract_pages(data: bytes, *, allow_scanned: bool = False) -> list[str
             raise RuntimeError("The PDF extractor could not start.")
         return json.loads(result.stdout)
 
-    pages = await asyncio.to_thread(extract)
+    return await asyncio.to_thread(extract)
+
+
+async def extract_pages(data: bytes, *, allow_scanned: bool = False) -> list[str]:
+    pages = await _extract_pdf(data)
     if not allow_scanned and not any(page.strip() for page in pages):
         raise InvalidDocument(f"{SCANNED_MESSAGE} The PDF has no searchable text.")
     return pages
+
+
+async def extract_code_layout(data: bytes) -> list[dict]:
+    return await _extract_pdf(data, "--code-layout")
 
 
 def chunk_pages(pages: list[str]) -> list[dict]:

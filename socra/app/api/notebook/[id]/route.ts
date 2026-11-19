@@ -17,7 +17,7 @@ export async function PATCH(
     return NextResponse.json({ error: "A valid note version is required." }, { status: 400 })
   }
   let fields
-  try { fields = editableNote(body) }
+  try { fields = editableNote(body, user.id) }
   catch (error) { return NextResponse.json({ error: (error as Error).message }, { status: 400 }) }
   try {
     if (fields.course_id && !await ownsNoteCourse(supabase, user.id, fields.course_id)) {

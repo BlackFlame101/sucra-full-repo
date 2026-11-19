@@ -10,12 +10,15 @@ async function main() {
     }
     let size = 0
     const pages = []
+    const layout = process.argv.includes("--code-layout")
+    let geometryCount = 0
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
       const page = await pdf.getPage(pageNumber)
       const stream = page.streamTextContent().getReader()
       try {
         let text = ""
         let previousY
+        const items = []
         while (true) {
           const { value, done } = await stream.read()
           if (done) break
@@ -23,6 +26,13 @@ async function main() {
             if (typeof item.str !== "string") continue
             const y = item.transform[5]
             if (previousY !== undefined && previousY !== y && !text.endsWith("\n")) text += "\n"
+            if (layout && item.str.trim()) {
+              if (++geometryCount > 40_000) {
+                process.exitCode = 3
+                return
+              }
+              items.push([text.length, item.str.length, item.transform[4], y, item.width, item.height])
+            }
             text += item.str + (item.hasEOL ? "\n" : "")
             if (size + text.length > 1_000_000) {
               process.exitCode = 3
@@ -32,7 +42,7 @@ async function main() {
           }
         }
         size += text.length
-        pages.push(text.trim())
+        pages.push(layout ? { text, items } : text.trim())
       } finally {
         await stream.cancel()
         page.cleanup()

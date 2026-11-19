@@ -3,7 +3,10 @@ import StarterKit from "@tiptap/starter-kit"
 import TaskList from "@tiptap/extension-task-list"
 import TaskItem from "@tiptap/extension-task-item"
 import Mathematics from "@tiptap/extension-mathematics"
+import { TableKit } from "@tiptap/extension-table"
+import Image from "@tiptap/extension-image"
 import { safeNoteLink, type NoteDocument } from "./document"
+import { isNotebookImagePath } from "./images"
 
 export const notebookId = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
 
@@ -28,6 +31,12 @@ export const notebookExtensions = [
   TaskList,
   TaskItem.configure({ nested: true }),
   Mathematics.configure({ katexOptions: { throwOnError: false, trust: false } }),
+  TableKit.configure({ table: { renderWrapper: true } }),
+  Image.extend({
+    parseHTML() {
+      return [{ tag: "img[src]", getAttrs: element => isNotebookImagePath(element.getAttribute("src")) ? null : false }]
+    },
+  }).configure({ allowBase64: false }),
   SourceBlock,
 ]
 
@@ -49,6 +58,11 @@ export function validateNoteDocument(value: unknown): NoteDocument {
   doc.check()
   doc.descendants((node) => {
     if (node.type.name === "sourceBlock" && !notebookId.test(node.attrs.sourceId ?? "")) throw new Error("Invalid Socra source.")
+    if (node.type.name === "image" && (!isNotebookImagePath(node.attrs.src) ||
+        (node.attrs.alt != null && (typeof node.attrs.alt !== "string" || node.attrs.alt.length > 240)) ||
+        node.attrs.title != null || node.attrs.width != null || node.attrs.height != null)) {
+      throw new Error("Invalid Notebook image.")
+    }
     if (["inlineMath", "blockMath"].includes(node.type.name) &&
         (typeof node.attrs.latex !== "string" || node.attrs.latex.length > 4_000)) throw new Error("Invalid equation.")
     for (const mark of node.marks) {

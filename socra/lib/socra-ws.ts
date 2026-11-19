@@ -36,6 +36,7 @@ export interface EvaluationResult {
 }
 
 export type LearningMode = "socratic" | "exercise" | "explain"
+export type ExplainFormat = "focused" | "full_document"
 export type NotebookAction = "ask" | "related" | "improve" | "expand" | "simplify" | "example" | "summarize" | "correct" | "flashcards" | "quiz"
 export type NotebookContext = { id: string; action: NotebookAction; selection?: string }
 
@@ -164,6 +165,8 @@ export interface WSClientMessage {
   accessToken?: string
   action?: "authenticate" | "message" | "submit_attempt" | "reveal_solution" | "restore_exercise" | "cancel"
   exerciseId?: string
+  documentId?: string
+  explainFormat?: ExplainFormat
   answer?: string
   hintsUsed?: number
   notebook?: NotebookContext
@@ -173,11 +176,14 @@ export interface WSClientMessage {
 // URL helpers
 // ---------------------------------------------------------------------------
 
-/** Resolve the WS base URL, with a sensible localhost fallback. */
+/** Resolve the WS base URL, keeping localhost frontend cookies off the socket. */
 export function getBackendWsUrl(): string {
-  const fromEnv = process.env.NEXT_PUBLIC_BACKEND_WS_URL
-  if (fromEnv && fromEnv.length > 0) return fromEnv.replace(/\/+$/, "")
-  return "ws://localhost:8000"
+  const baseUrl = (process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://127.0.0.1:8000").replace(/\/+$/, "")
+  if (typeof window === "undefined" || window.location.hostname !== "localhost") return baseUrl
+
+  // Cookies are scoped by hostname, so using another port on localhost still sends
+  // the frontend session cookies in the upgrade request.
+  return baseUrl.replace(/^ws:\/\/localhost(?=[:/]|$)/i, "ws://127.0.0.1")
 }
 
 export function buildChatWsUrl(sessionId: string): string {

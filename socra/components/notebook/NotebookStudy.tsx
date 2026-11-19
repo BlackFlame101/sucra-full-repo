@@ -4,6 +4,7 @@ import Link from "next/link"
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { ExerciseCard } from "@/components/chat/ExerciseCard"
 import { ExerciseFeedbackCard } from "@/components/chat/ExerciseFeedbackCard"
 import { TabsContent } from "@/components/ui/tabs"
@@ -74,6 +75,7 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
   const { getActiveConfig } = useUserSettings()
   const base = "/api/notebook/" + note.id + "/study"
   const [input, setInput] = useState("")
+  const [toolInstructions, setToolInstructions] = useState("")
   const [questionAnchor, setQuestionAnchor] = useState<EditAnchor | null>(null)
   const questionInput = useRef<HTMLInputElement>(null)
   const transcript = useRef<HTMLDivElement>(null)
@@ -181,6 +183,11 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
     finally { busyRef.current = false; setPending(false) }
   }, [busy, workspace, proposal, lastAnswer?.id, sendMessage, note.id])
 
+  const runTool = (action: NotebookAction, instruction: string, edit = false) => {
+    const detail = toolInstructions.trim()
+    void run(action, detail ? `${instruction}\n\n${detail}` : instruction, edit)
+  }
+
   useEffect(() => {
     if (!selectionRequest || busy || handledSelection.current === selectionRequest) return
     const timer = setTimeout(() => {
@@ -203,6 +210,15 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
       return
     }
     setProposal(undefined)
+    setError("")
+    onApplied()
+  }
+
+  function insertReplyAtEnd(content: string) {
+    if (!workspace.current?.apply(content, "end", null)) {
+      setError("Could not insert this reply. Check that the note editor is open.")
+      return
+    }
     setError("")
     onApplied()
   }
@@ -250,7 +266,7 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
             </div>}
             {chat.messages.map((message) => {
               const content = message.parts.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n")
-              const metadata = message.metadata as { notebook_action?: string; request_id?: string; partial?: boolean } | undefined
+              const metadata = message.metadata as { notebook_action?: string; request_id?: string; partial?: boolean; persisted?: boolean } | undefined
               const isEdit = metadata?.notebook_action && Object.hasOwn(edits, metadata.notebook_action)
               const key = metadata?.request_id ? metadata.request_id + ":" + message.role : message.id
               if (isEdit && message.role === "assistant") return <p key={key} className="rounded-lg border px-4 py-3 text-sm text-muted-foreground">
@@ -259,7 +275,9 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
               </p>
               if (!content) return null
               return message.role === "assistant"
-                ? <NotebookReply key={key} content={content} streaming={!idle && message.id === lastAnswer?.id} partial={metadata?.partial} />
+                ? <NotebookReply key={key} content={content} streaming={!idle && message.id === lastAnswer?.id} partial={metadata?.partial}
+                  onInsertAtEnd={metadata?.persisted && (!metadata.notebook_action || ["ask", "related"].includes(metadata.notebook_action))
+                    ? insertReplyAtEnd : undefined} />
                 : <p key={key} className="ml-auto w-fit max-w-[90%] whitespace-pre-wrap rounded-xl bg-secondary/10 px-4 py-2 text-sm [overflow-wrap:anywhere]">{content}</p>
             })}
           </div>
@@ -288,9 +306,14 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
       {feedback}
       {!idle && <Button size="sm" variant="ghost" onClick={chat.stop}>Stop generation</Button>}
 
+      <label className="block space-y-1.5 text-sm">
+        <span>Instructions for Study Tools <span className="text-muted-foreground">(optional)</span></span>
+        <Textarea value={toolInstructions} rows={2} maxLength={1600} onChange={(event) => setToolInstructions(event.target.value)}
+          placeholder="For example, add two beginner-friendly Python examples about Prefect retries." />
+      </label>
       <div className="flex flex-wrap gap-1">
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void run("flashcards", "Generate flashcards from this note.")}>Generate flashcards</Button>
-        <Button size="sm" variant="outline" disabled={busy} onClick={() => void run("quiz", "Generate a short-answer practice question based on this note.")}>Quiz me</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => runTool("flashcards", "Generate flashcards from this note.")}>Generate flashcards</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => runTool("quiz", "Generate a short-answer practice question based on this note.")}>Quiz me</Button>
       </div>
       {stale && <p className="text-xs text-muted-foreground">These cards were generated before the latest note edit.</p>}
       {cards[card] && <section className="space-y-2 rounded-lg border p-3 text-sm" aria-label="Flashcard review">
@@ -304,11 +327,11 @@ function NotebookThread({ note, workspace, thread, tab, onApplied, selectionRequ
       </section>}
       {exercise && <ExerciseCard exercise={exercise} disabled={busy} submissionLocked={Boolean(correction)}
         onSubmitAttempt={(answer, hintsUsed) => chat.submitAttempt({ exerciseId: exercise.id, answer, hintsUsed })}
-        onNextExercise={() => void run("quiz", "Generate another short-answer practice question based on this note.")} />}
+        onNextExercise={() => runTool("quiz", "Generate another short-answer practice question based on this note.")} />}
       {correction && <ExerciseFeedbackCard correction={correction} solution={null} readOnly />}
       <div className="flex flex-wrap gap-1" role="group" aria-label="Suggest an edit">
         {Object.entries(edits).map(([action, label]) => <Button key={action} size="sm" variant="outline" disabled={busy}
-          onClick={() => void run(action as NotebookAction, label, true)}>{label}</Button>)}
+          onClick={() => runTool(action as NotebookAction, label, true)}>{label}</Button>)}
       </div>
       <ReviewSchedule note={note} onReview={onReview} />
     </TabsContent>

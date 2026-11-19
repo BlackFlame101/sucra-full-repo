@@ -49,13 +49,16 @@ export async function POST(request: Request) {
   const metadata = (message.metadata ?? {}) as {
     explanation?: PublicExplanation; correction?: PublicCorrection; exercise?: unknown; exercise_id?: string
     qcm_status?: "unreviewed" | "partial" | "failed"
+    course_lesson_status?: "unreviewed" | "partial" | "failed"
     course_context?: { suggested_readings?: SuggestedReadingItem[] }
   }
   if (metadata.qcm_status === "failed") return fail("This QCM has no answer to save.", 422)
+  if (metadata.course_lesson_status === "failed") return fail("This lesson has no answer to save.", 422)
   const qcm = metadata.qcm_status === "unreviewed" || metadata.qcm_status === "partial"
+  const sourcedMarkdown = qcm || Boolean(metadata.course_lesson_status)
   const explanation = qcm ? undefined : metadata.explanation
   const correction = qcm ? undefined : metadata.correction
-  const kind = qcm || explanation ? "explanation" : correction ? "exercise" : "tutor"
+  const kind = sourcedMarkdown || explanation ? "explanation" : correction ? "exercise" : "tutor"
   if (metadata.exercise && !correction) return fail("Save the feedback after answering the exercise.", 400)
   let content = message.content
   let doc: NoteDocument | undefined
@@ -65,13 +68,13 @@ export async function POST(request: Request) {
   let citations: ExerciseCitation[] = explanationCitations ?? correction?.citations ??
     (metadata.course_context?.suggested_readings ?? []).flatMap((reading) => reading.document_id
       ? [{ ...reading, document_id: reading.document_id, filename: reading.filename ?? "Course PDF" }] : [])
-  if (qcm) {
+  if (sourcedMarkdown) {
     // The persisted Markdown is the same final answer displayed in chat.
     try {
       doc = validateNoteDocument(markdownNote(message.content))
       citations = qcmPageLinks(doc)
     } catch {
-      return fail("This QCM could not be converted into a note with its source pages.", 422)
+      return fail("This response could not be converted into a note with its source pages.", 422)
     }
   }
   const service = await createServiceClient()
@@ -116,7 +119,7 @@ export async function POST(request: Request) {
       return doc && Number.isInteger(citation.page_number) && citation.page_number! > 0 &&
         (!doc.page_count || citation.page_number! <= doc.page_count) ? [{ ...citation, filename: doc.filename }] : []
     })
-    if (qcm && citations.length !== expected) return fail("A QCM source page is unavailable in this course.", 422)
+    if (sourcedMarkdown && citations.length !== expected) return fail("A source page is unavailable in this course.", 422)
   }
 
   if (explanation) {

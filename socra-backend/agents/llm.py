@@ -141,6 +141,28 @@ def _cached_default_llm(
     )
 
 
+class SingleDispatchGoogleTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
+    """Use HTTPX for Gemini so each invocation owns exactly one dispatch."""
+
+    def __init__(self):
+        # The SDK shares client_args between its sync and async HTTPX clients.
+        self.sync_transport = httpx.HTTPTransport(retries=0)
+        self.async_transport = httpx.AsyncHTTPTransport(retries=0)
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self.sync_transport.handle_request(request)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self.async_transport.handle_async_request(request)
+
+    def close(self) -> None:
+        self.sync_transport.close()
+
+    async def aclose(self) -> None:
+        self.close()
+        await self.async_transport.aclose()
+
+
 def get_chat_llm(
     temperature: float = 0.4,
     *,

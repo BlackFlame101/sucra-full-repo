@@ -23,7 +23,11 @@ function citationMarkdown(citation: ExerciseCitation) {
 }
 
 export function explanationNoteText(explanation: PublicExplanation): string {
-  const lines = ["# " + (explanation.definition?.trim() || "Course explanation"), explanation.intuition]
+  const definition = explanation.definition?.trim() ?? ""
+  const authoredTitle = /^# [^\r\n]+(?:\r?\n|$)/.test(definition)
+  const lines = authoredTitle
+    ? [definition, explanation.intuition]
+    : [`# ${explanation.language === "French" ? "Explication du cours" : "Course explanation"}`, definition, explanation.intuition]
   const course = explanation.course_progress
   if (course) {
     const french = course.language === "French"

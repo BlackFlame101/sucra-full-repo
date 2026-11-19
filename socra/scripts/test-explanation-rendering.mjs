@@ -33,12 +33,20 @@ function load(path, overrides = {}) {
 }
 
 const { ExplanationCard } = load("components/chat/ExplanationCard.tsx")
+const { TutorMessage } = load("components/chat/TutorMessage.tsx")
 const { coverageCopy, explanationCardLayout } = load("lib/ai/explanation-card-layout.ts")
 const { explanationProgressKey, readExplanationProgress, writeExplanationProgress } = load("lib/ai/explanation-progress.ts")
-const { StudyMarkdown } = load("components/notebook/NotebookReply.tsx")
+const { StudyMarkdown, NotebookReply } = load("components/notebook/NotebookReply.tsx")
 const { explanationNoteText } = load("lib/ai/explanation-note.ts")
 const { readNoteDocument, noteText } = load("lib/notebook/document.ts")
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props))
+
+test("Ask Socra replies offer append only when complete", () => {
+  const props = { content: "A worked example. ".repeat(120), onInsertAtEnd: () => {} }
+  inOrder(render(NotebookReply, { ...props, streaming: false }), "Copy response", "Insert at end", "Collapse response")
+  assert.doesNotMatch(render(NotebookReply, { ...props, streaming: true }), /Insert at end/)
+  assert.doesNotMatch(render(NotebookReply, { ...props, streaming: false, partial: true }), /Insert at end/)
+})
 
 test("brief metadata preserves a compact table and source order, and keeps extras optional", () => {
   const html = render(ExplanationCard, { explanation: explanationFixtures.brief, onDiscuss: () => {} })
@@ -48,10 +56,36 @@ test("brief metadata preserves a compact table and source order, and keeps extra
   assert.doesNotMatch(html, /Expand all|<progress/)
 })
 
-test("standard sourced measurements render as labelled values without walkthrough controls", () => {
+test("standard sourced measurements stay in a table without walkthrough controls", () => {
   const html = render(ExplanationCard, { explanation: explanationFixtures.standard })
-  inOrder(html, "Why normalize", "Scaling makes distances", "<ol", "Expected results", "<dl", "0.478", "0.780")
+  inOrder(html, "Why normalize", "Scaling makes distances", "<ol", "Expected results", "<table", "0.478", "0.780")
   assert.doesNotMatch(html, /Expand all|<progress/)
+})
+
+test("focused reports show navigable headings and save the introduction as prose", () => {
+  const explanation = {
+    ...explanationFixtures.standard,
+    definition: "# Transformer et Estimator\n\nLes deux interviennent à des étapes différentes.",
+    intuition: "",
+    language: "French",
+    sections: [
+      { heading: "Transformer", content: "Applique une transformation.", citations: [] },
+      { heading: "Estimator", content: "Ajuste un modèle.", citations: [] },
+      { heading: "Exemple de pipeline", content: "Un modèle ajusté peut transformer de nouvelles données.", citations: [] },
+    ],
+  }
+  const html = render(ExplanationCard, { explanation })
+  assert.match(html, /<nav aria-label="Dans cette explication"/)
+  const targets = [...html.matchAll(/href="#([^"]+-section-\d+)"/g)].map((match) => match[1])
+  assert.equal(targets.length, 3)
+  for (const target of targets) assert.ok(html.includes(`<section id="${target}"`))
+  assert.match(html, /<h4[^>]*>Exemple de pipeline<\/h4>/)
+  assert.match(explanationNoteText(explanation), /^# Transformer et Estimator\n\nLes deux interviennent/)
+  assert.match(html, /class="explanation-document /)
+  const streamed = render(TutorMessage, { content: explanationNoteText(explanation), explanationPreview: true, isStreaming: true })
+  assert.match(streamed, /class="explanation-document /)
+  assert.match(streamed, /<h3[^>]*>Transformer et Estimator<\/h3>/)
+  assert.match(streamed, /Responding/)
 })
 
 test("saved overflow notices and French templates preserve their full text in the card and Notebook", () => {
@@ -234,7 +268,7 @@ test("all five fixtures use the shared card and reveal only content-supported co
     assert.match(html, new RegExp(`data-explanation-card="${profile}"`))
     assert.equal(html.includes("Checklist progress"), profile === "guide")
     assert.equal(html.includes("Show answer"), profile === "language")
-    assert.equal(html.includes("Expand all"), ["guide", "language", "research"].includes(profile))
+    assert.equal(html.includes("Expand all"), profile === "guide")
     assert.doesNotMatch(html, /Save to Library|Save to Notebook|Discuss in Socratic dialogue/)
   }
   const guide = render(ExplanationCard, { explanation: explanationFixtures.guide })
@@ -383,27 +417,33 @@ test("the scroll shortcut sits outside the message viewport directly before the 
     "./ExerciseCard": { ExerciseCard: nothing },
     "./ExerciseFeedbackCard": { ExerciseFeedbackCard: nothing },
     "./ExplanationCard": { ExplanationCard: nothing },
+    "./ExplainPdfSelect": { ExplainPdfSelect: nothing },
     "@/components/ui/select": { Select: nothing, SelectContent: nothing, SelectItem: nothing, SelectTrigger: nothing, SelectValue: nothing },
     "@/components/ui/button": { Button: ({ children, "aria-label": label, "aria-controls": controls }) =>
       React.createElement("button", { "aria-label": label, "aria-controls": controls }, children) },
   })
-  const html = render(ChatPanel, { messages: [], learningMode: "explain", status: "ready" })
+  const props = { messages: [], learningMode: "explain", status: "ready" }
+  const html = render(ChatPanel, { ...props, contextOpen: false })
+  assert.match(html, /data-course-context="closed"/)
+  assert.match(render(ChatPanel, { ...props, contextOpen: true }), /data-course-context="open"/)
   const viewportId = html.match(/id="([^"]+)" role="region" aria-label="Chat messages"/)?.[1]
   assert.ok(viewportId)
   inOrder(html, "Message viewport</p></div></div>", 'aria-label="Scroll to latest message"', 'aria-label="Chat composer"')
   assert.ok(html.includes('aria-controls="' + viewportId + '"'))
 })
 
-test("Notebook table fallback retains row boundaries through editor rendering and text export", () => {
+test("Notebook native tables retain row boundaries through editor rendering and text export", () => {
   const table = "| Model | F1 |\n| --- | --- |\n| Learner A | 0.781 |\n| Learner B | 0.837 |"
   const explanation = { ...explanationFixtures.guide, sections: [{ heading: "Evaluation", content: table }] }
   assert.match(render(ExplanationCard, { explanation, readOnly: true }), /<table/)
   assert.match(render(StudyMarkdown, { content: table }), /<table/)
   const note = readNoteDocument(null, explanationNoteText(explanation), true)
   const stored = readNoteDocument(JSON.parse(JSON.stringify(note)), "")
-  const tableBlock = stored.content.find((node) => noteText(node) === table)
-  assert.equal(tableBlock.content.filter((node) => node.type === "hardBreak").length, 3)
-  assert.ok(noteText(stored).includes(table))
+  const tableBlock = stored.content.find((node) => node.type === "table")
+  assert.deepEqual(tableBlock.content.map((row) => row.content.map(noteText)), [
+    ["Model", "F1"], ["Learner A", "0.781"], ["Learner B", "0.837"],
+  ])
+  assert.ok(noteText(stored).includes("Learner A\t0.781\nLearner B\t0.837"))
 })
 
 test("source results and labeled general guidance stay near the step and plain quotes remain unchanged", () => {

@@ -80,6 +80,35 @@ class SocketTests(unittest.TestCase):
         self.assertFalse(self.rows)
         self.quota.assert_awaited_once_with("owner", "explain")
 
+    def test_selected_explain_pdf_is_bound_to_request_and_replay(self):
+        document_id = str(uuid4())
+        manifest = {"document_id": document_id, "scope": "chapter"}
+        with patch("graph.nodes.run_explicateur", AsyncMock(side_effect=lambda state: {
+            **state, "explain_source_manifest": manifest, "explain_manifest_text": "## Partie I",
+        })) as explain:
+            ws = self.connect()
+            request = self.send(ws, mode="explain", documentId=document_id)
+            self.assertEqual(self.until(ws, "done")[-1]["type"], "done")
+            self.send(ws, mode="explain", documentId=document_id, request=request)
+            self.assertEqual(self.until(ws, "done")[-1]["type"], "done")
+            self.send(ws, mode="explain", documentId=str(uuid4()), request=request)
+            self.assertEqual(self.until(ws, "done")[-1]["type"], "error")
+        self.assertEqual(explain.await_args.args[0]["explain_document_id"], document_id)
+        self.assertEqual(self.rows[("assistant", request)]["metadata"]["explain_source_manifest"], manifest)
+        explain.assert_awaited_once()
+
+    def test_explanation_format_is_bound_for_generation_and_replay(self):
+        with patch("graph.nodes.run_explicateur", AsyncMock(side_effect=lambda state: {
+            **state, "course_lesson_status": "unreviewed", "course_lesson_text": "# Report",
+        })) as explain:
+            ws = self.connect()
+            request = self.send(ws, mode="explain", explainFormat="full_document")
+            self.assertEqual(self.until(ws, "done")[-1]["type"], "done")
+            self.send(ws, mode="explain", request=request, explainFormat="focused")
+            self.assertEqual(self.until(ws, "done")[-1]["type"], "error")
+        explain.assert_awaited_once()
+        self.assertEqual(explain.await_args.args[0]["explain_format"], "full_document")
+
     def test_partial_qcm_markdown_is_persisted_and_replayed(self):
         text = "## Q1 · [PDF, p. 1](/api/documents/view/fixture?page=1#page=1)\n\nQ2 reste sans réponse."
 
@@ -105,6 +134,34 @@ class SocketTests(unittest.TestCase):
             completed = next(event for event in events if event["type"] == "response_complete")
             self.assertEqual(completed["content"], {"message_id": saved["id"], "text": text})
             self.assertFalse(any(event["type"] == "card_ready" for event in events))
+        explain.assert_awaited_once()
+
+    def test_course_lesson_streams_parts_and_replays_saved_markdown(self):
+        first_part = "# Explication du cours\n\n## Interprétabilité\n\nUne définition.\n\n"
+        second_part = "## Auditabilité\n\nUne procédure."
+        text = first_part + second_part
+
+        async def lesson(state):
+            await state["preview"](first_part)
+            await state["preview"](second_part)
+            return {**state, "course_lesson_text": text, "course_lesson_status": "partial"}
+
+        prompt = "Explique le chapitre 6 en détail"
+        with patch("graph.nodes.run_explicateur", AsyncMock(side_effect=lesson)) as explain:
+            ws = self.connect()
+            request = self.send(ws, mode="explain", message=prompt)
+            initial = self.until(ws, "done")
+            self.send(ws, mode="explain", message=prompt, request=request)
+            replay = self.until(ws, "done")
+        saved = self.rows[("assistant", request)]
+        self.assertEqual(saved["content"], text)
+        self.assertEqual(saved["metadata"]["course_lesson_status"], "partial")
+        self.assertEqual([event["content"]["text"] for event in initial if event["type"] == "content_delta"],
+                         [first_part, second_part])
+        self.assertFalse(any(event["type"] == "content_delta" for event in replay))
+        for events in (initial, replay):
+            completed = next(event for event in events if event["type"] == "response_complete")
+            self.assertEqual(completed["content"], {"message_id": saved["id"], "text": text})
         explain.assert_awaited_once()
 
     def test_qcm_provider_failure_replays_without_rerunning_generation(self):

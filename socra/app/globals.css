@@ -213,6 +213,15 @@ body:has([data-dashboard-workspace]) {
 }
 .notebook-prose pre { font-size: .85rem; overflow-x: auto; overflow-wrap: normal; }
 .notebook-prose a { text-decoration: underline; text-underline-offset: 3px; }
+.notebook-prose .tableWrapper { max-width: 100%; overflow-x: auto; }
+.notebook-prose img { display: block; max-width: 100%; height: auto; }
+@media print {
+  .notebook-prose img { break-inside: avoid; }
+}
+.notebook-prose table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.notebook-prose :is(th, td) { border: 1px solid var(--border); padding: .5rem; text-align: start; vertical-align: top; }
+.notebook-prose th { background: var(--muted); }
+.notebook-prose .selectedCell { background: var(--accent); }
 .notebook-source { font-size: .85rem; }
 .notebook-prose .ProseMirror-selectednode { outline: 2px solid var(--ring); }
 
@@ -220,6 +229,34 @@ body:has([data-dashboard-workspace]) {
 .notebook-prose li + li { margin-top: .3rem; }
 .notebook-prose a { color: var(--secondary); }
 .notebook-prose .katex-display > .katex { white-space: normal; }
+
+.explanation-document {
+  width: 100%;
+  max-width: var(--explanation-document-width, 100%);
+  min-width: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+.explanation-document-body { font-size: 0.975rem; line-height: 1.75; }
+.explanation-document :is(h3, h4, h5) {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  line-height: 1.25;
+}
+.explanation-document h3 { font-size: clamp(1.35rem, 1.1rem + 1vw, 1.9rem); }
+.explanation-document h4 { font-size: 1.16rem; }
+.explanation-document h5 { font-size: 1.02rem; }
+.explanation-document :is(p, blockquote, ol, ul):not(:has(pre, table)) {
+  max-width: var(--explanation-reading-width, 46rem);
+}
+.explanation-document-outline { max-width: var(--explanation-reading-width, 46rem); }
+[data-course-context="open"] { --explanation-document-width: 52rem; }
+[data-course-context="closed"] {
+  --explanation-document-width: 100%;
+  --explanation-reading-width: none;
+}
+.explanation-document-body :is(h4, h5):not(:first-child) { margin-block-start: 1.25em; }
+.explanation-document-body pre { overflow-wrap: normal; }
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {

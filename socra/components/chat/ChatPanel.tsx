@@ -10,6 +10,7 @@ import { ChatInput } from "./ChatInput"
 import { ExerciseCard } from "./ExerciseCard"
 import { ExerciseFeedbackCard } from "./ExerciseFeedbackCard"
 import { ExplanationCard } from "./ExplanationCard"
+import { ExplainFormatSelect, ExplainPdfSelect } from "./ExplainPdfSelect"
 import {
   Select,
   SelectContent,
@@ -17,7 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { LearningMode, PublicCorrection, PublicExercise, PublicExplanation, PublicSolution } from "@/lib/socra-ws"
+import type { ExplainFormat, LearningMode, PublicCorrection, PublicExercise, PublicExplanation, PublicSolution } from "@/lib/socra-ws"
 import type { UIMessage } from "ai"
 
 interface ChatPanelProps {
@@ -39,6 +40,11 @@ interface ChatPanelProps {
   onAttach?: () => void
   learningMode: LearningMode
   onLearningModeChange: (mode: LearningMode) => void
+  explainPdfs: { id: string; filename: string }[]
+  explainPdfId: string
+  explainFormat?: ExplainFormat
+  onExplainFormatChange?: (format?: ExplainFormat) => void
+  onExplainPdfChange: (id: string) => void
   exercise: PublicExercise | null
   onNextExercise: () => void
   onSubmitAttempt: (answer: string, hintsUsed: number) => void
@@ -80,6 +86,11 @@ export function ChatPanel({
   onAttach,
   learningMode,
   onLearningModeChange,
+  explainPdfs,
+  explainPdfId,
+  explainFormat,
+  onExplainFormatChange,
+  onExplainPdfChange,
   exercise,
   onNextExercise,
   onSubmitAttempt,
@@ -227,6 +238,9 @@ export function ChatPanel({
               <SelectItem value="explain">Explain a topic</SelectItem>
             </SelectContent>
           </Select>
+          {learningMode === "explain" && <ExplainPdfSelect documents={explainPdfs} value={explainPdfId} onChange={onExplainPdfChange} />}
+          {learningMode === "explain" && onExplainFormatChange &&
+            <ExplainFormatSelect value={explainFormat} onChange={onExplainFormatChange} />}
           <Button
             type="button"
             variant="ghost"
@@ -251,6 +265,7 @@ export function ChatPanel({
 
       {/* Messages */}
       <div ref={scrollAreaRef} id={scrollAreaId} role="region" aria-label="Chat messages" tabIndex={0}
+        data-course-context={contextOpen ? "open" : "closed"}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
         <div className="flex w-full min-w-0 max-w-full flex-col overflow-x-hidden pb-2">
           <MessageList

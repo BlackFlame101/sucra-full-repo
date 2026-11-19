@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import test from "node:test"
 import ts from "typescript"
-import { getDocumentProxy } from "unpdf"
+import { getDocumentProxy, getResolvedPDFJS } from "unpdf"
 
 const require = createRequire(import.meta.url)
 function load(path, dependencies = {}) {
@@ -17,10 +17,222 @@ function load(path, dependencies = {}) {
 }
 
 const document = load("lib/notebook/document.ts")
-const schema = load("lib/notebook/schema.ts", { "./document": document })
+const images = load("lib/notebook/images.ts")
+const schema = load("lib/notebook/schema.ts", { "./document": document, "./images": images })
+const notebookServer = load("lib/server/notebook.ts", {
+  "@/lib/notebook/document": document, "@/lib/notebook/schema": schema, "@/lib/notebook/images": images,
+})
+const notebookImageServer = load("lib/server/notebook-image.ts", { "@/lib/notebook/images": images })
 const id = "00000000-0000-0000-0000-000000000001"
 const course = "00000000-0000-0000-0000-000000000002"
 const session = "00000000-0000-0000-0000-000000000003"
+
+test("pasting a copied Socra response keeps code, indentation, headings and nested commands", () => {
+  const python = "def train():\n    if ready:\n        return 42"
+  const command = "prefect work-pool create pool-tp --type process"
+  const markdown = [
+    "### Prefect example", "Use the following flow.",
+    "```python\n" + python + "\n```",
+    "1. Set up the work pool.\n\n   ```bash\n   " + command + "\n   ```",
+  ].join("\n\n")
+  const pasted = schema.validateNoteDocument(document.fencedMarkdownPaste(markdown))
+  assert.equal(pasted.content[0].type, "heading")
+  assert.equal(pasted.content[2].type, "codeBlock")
+  assert.equal(pasted.content[2].attrs.language, "python")
+  assert.equal(document.noteText(pasted.content[2]), python)
+  const nested = pasted.content[3].content[0].content.find(node => node.type === "codeBlock")
+  assert.equal(nested.attrs.language, "bash")
+  assert.equal(document.noteText(nested), command)
+  assert.equal(document.fencedMarkdownPaste("Ordinary text\nwith a line break."), null)
+})
+
+test("Notebook PDF embeds owned PNG, JPEG and WebP without clipping or splitting", async () => {
+  const sharp = require("sharp")
+  const paths = [`${id}/${id}.png`, `${id}/${course}.jpg`, `${id}/${session}.webp`]
+  const formats = ["png", "jpeg", "webp"]
+  const sizes = [[40, 30], [60, 40], [120, 1800]]
+  const buffers = await Promise.all(formats.map((format, i) => sharp({
+    create: { width: sizes[i][0], height: sizes[i][1], channels: 3, background: ["red", "green", "blue"][i] },
+  }).toFormat(format).toBuffer()))
+  const note = { title: "Screenshots", content: "", source_type: "manual",
+    content_json: { type: "doc", content: paths.map(src => ({ type: "image", attrs: { src } })) } }
+  const downloaded = []
+  const { GET } = load("app/api/notebook/[id]/pdf/route.ts", {
+    "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
+    "@/lib/notebook/images": images, "@/lib/server/notebook-image": notebookImageServer,
+    "@/lib/notebook/pdf": load("lib/notebook/pdf.ts", { "./document": document }),
+    "@/lib/notebook/pdf-filename": load("lib/notebook/pdf-filename.ts"),
+    "@/lib/supabase/server": { createClient: async () => ({
+      auth: { getUser: async () => ({ data: { user: { id } } }) },
+      from: () => query(fields => fields.id === session && fields.user_id === id ? note : null),
+      storage: { from: bucket => ({ download: async path => {
+        assert.equal(bucket, "notebook-images")
+        downloaded.push(path)
+        return { data: new Blob([buffers[paths.indexOf(path)]]) }
+      } }) },
+    }) },
+  })
+  const request = () => GET(new Request(`https://socra.test/api/notebook/${session}/pdf`), { params: Promise.resolve({ id: session }) })
+  const response = await request()
+  assert.equal(response.status, 200)
+  assert.deepEqual(downloaded, paths)
+  const pdf = await getDocumentProxy(new Uint8Array(await response.arrayBuffer()), { isEvalSupported: false })
+  const { OPS } = await getResolvedPDFJS()
+  try {
+    assert.equal(pdf.numPages, 2)
+    const paintings = []
+    for (const number of [1, 2]) {
+      const page = await pdf.getPage(number)
+      const { fnArray, argsArray } = await page.getOperatorList()
+      let transform
+      for (const [index, op] of fnArray.entries()) {
+        if (op === OPS.transform) transform = argsArray[index]
+        if (op === OPS.paintImageXObject || op === OPS.paintInlineImageXObject) {
+          const [width, , , height, x, y] = transform
+          assert.ok(x >= 45 && y + height >= 45)
+          const viewport = page.getViewport({ scale: 1 })
+          assert.ok(x + width <= viewport.width - 45 && y <= viewport.height - 45)
+          paintings.push([number, width / Math.abs(height)])
+        }
+      }
+    }
+    assert.deepEqual(paintings.map(([page]) => page), [1, 1, 2])
+    for (const [index, [, ratio]] of paintings.entries()) {
+      assert.ok(Math.abs(ratio - sizes[index][0] / sizes[index][1]) < 0.001)
+    }
+  } finally { await pdf.destroy() }
+  note.content_json.content = [{ type: "image", attrs: { src: `${course}/${id}.png` } }]
+  downloaded.length = 0
+  assert.equal((await request()).status, 422)
+  assert.deepEqual(downloaded, [])
+})
+
+test("Notebook screenshot persistence accepts owned immutable paths and rejects URLs and other owners", () => {
+  const src = `${id}/${course}.png`
+  const body = (value) => ({ title: "Screenshot", content_json: {
+    type: "doc", content: [{ type: "image", attrs: { src: value, alt: "Screenshot" } }],
+  } })
+  const saved = notebookServer.editableNote(body(src), id)
+  assert.equal(document.readNoteDocument(saved.content_json, "").content[0].attrs.src, src)
+  assert.throws(() => notebookServer.editableNote(body(src), session), /does not belong/)
+  for (const value of ["https://example.org/image.png", "data:image/png;base64,AA", `${src}?token=123`, `${id}/../${course}.png`]) {
+    assert.throws(() => notebookServer.editableNote(body(value), id), /Invalid Notebook image/)
+  }
+})
+
+test("Notebook screenshot uploads decode allowed formats and reject MIME spoofing and dimensions", async () => {
+  const sharp = require("sharp")
+  const { prepareNotebookImage } = load("lib/server/notebook-image.ts", { "@/lib/notebook/images": images })
+  const request = (body, type) => new Request("http://localhost/api/notebook/images", {
+    method: "POST", headers: { "Content-Type": type }, body,
+  })
+  for (const format of ["png", "jpeg", "webp"]) {
+    const bytes = await sharp({ create: { width: 10, height: 9, channels: 3, background: "#eee" } }).toFormat(format).toBuffer()
+    const result = await prepareNotebookImage(request(bytes, `image/${format}`))
+    assert.equal((await sharp(result.data).metadata()).format, format)
+    if (format === "jpeg") await assert.rejects(prepareNotebookImage(request(bytes, "image/png")), /valid, still/)
+  }
+  const wide = await sharp({ create: { width: 8200, height: 1, channels: 3, background: "#eee" } }).png().toBuffer()
+  await assert.rejects(prepareNotebookImage(request(wide, "image/png")), /dimensions/)
+  await assert.rejects(prepareNotebookImage(request(Buffer.alloc(images.notebookImageLimit + 1), "image/png")), /4 MiB/)
+})
+
+test("Notebook screenshot signing checks the user folder before touching storage", async () => {
+  let signed = 0
+  const { GET } = load("app/api/notebook/images/route.ts", {
+    "@/lib/notebook/images": images, "@/lib/server/notebook-image": {},
+    "@/lib/supabase/server": { createClient: async () => ({
+      auth: { getUser: async () => ({ data: { user: { id } } }) },
+      storage: { from: bucket => ({ createSignedUrl: async (path, ttl) => {
+        signed++
+        assert.equal(bucket, "notebook-images")
+        assert.equal(path, `${id}/${course}.png`)
+        assert.equal(ttl, 120)
+        return { data: { signedUrl: "https://example.org/signed" } }
+      } }) },
+    }) },
+  })
+  const response = (path) => GET(new Request(`http://localhost/api/notebook/images?path=${encodeURIComponent(path)}`))
+  assert.equal((await response(`${session}/${course}.png`)).status, 404)
+  assert.equal(signed, 0)
+  const owned = await response(`${id}/${course}.png`)
+  assert.equal(owned.status, 307)
+  assert.equal(owned.headers.get("cache-control"), "private, no-store")
+  assert.equal(signed, 1)
+})
+
+test("Notebook screenshot upload stays off by default and uses a fresh server-generated object path", async () => {
+  let uploads = 0
+  const { POST } = load("app/api/notebook/images/route.ts", {
+    "@/lib/notebook/images": images,
+    "@/lib/server/notebook-image": { prepareNotebookImage: async () => ({ data: Buffer.from("test"), type: "image/png", extension: "png" }) },
+    "@/lib/supabase/server": {
+      createClient: async () => ({ auth: { getUser: async () => ({ data: { user: { id } } }) } }),
+      createServiceClient: async () => ({ storage: { from: bucket => ({ upload: async (path, _bytes, options) => {
+        uploads++
+        assert.equal(bucket, "notebook-images")
+        assert.ok(images.ownsNotebookImagePath(path, id))
+        assert.deepEqual(options, { contentType: "image/png", upsert: false })
+        return { error: null }
+      } }) } }),
+    },
+  })
+  const previous = process.env.NOTEBOOK_IMAGE_UPLOADS
+  try {
+    delete process.env.NOTEBOOK_IMAGE_UPLOADS
+    assert.equal((await POST(new Request("http://localhost/api/notebook/images"))).status, 503)
+    assert.equal(uploads, 0)
+    process.env.NOTEBOOK_IMAGE_UPLOADS = "1"
+    const response = await POST(new Request("http://localhost/api/notebook/images", { method: "POST" }))
+    assert.equal(response.status, 201)
+    assert.ok(images.ownsNotebookImagePath((await response.json()).path, id))
+    assert.equal(uploads, 1)
+  } finally {
+    if (previous == null) delete process.env.NOTEBOOK_IMAGE_UPLOADS
+    else process.env.NOTEBOOK_IMAGE_UPLOADS = previous
+  }
+})
+
+test("lesson math keeps prose outside padded inline delimiters and retains display equations", () => {
+  const note = document.markdownNote("Le montant vaut $ 0,55 $. Puis la nuit vaut $ 0,40 $.\n\n$$\n0{,}12+0{,}46+0{,}31=0{,}89\n$$")
+  assert.deepEqual(note.content[0].content.map(node => node.attrs?.latex ?? node.text),
+    ["Le montant vaut ", "0,55", ". Puis la nuit vaut ", "0,40", "."])
+  assert.equal(note.content[1].type, "blockMath")
+  assert.equal(note.content[1].attrs.latex, "0{,}12+0{,}46+0{,}31=0{,}89")
+})
+
+test("Chapter 6 source tables, equations and code retain the Card's structure in Notebook", () => {
+  const markdown = [
+    "### II.3 Calculer une valeur de Shapley",
+    "| Coalition | Prédiction |\n| --- | --- |\n| aucune (moyenne du modèle) | $0.12$ |\n| montant seul | 0.55 |\n| nuit seule | 0.40 |\n| montant et nuit | **0.89** |",
+    "$$\n0.12+0.46+0.31=0.89\n$$",
+    "| Profondeur | Feuilles | F1 test |\n| --- | --- | --- |\n| 2 | 4 | 0,2293 |\n| 3 | 8 | 0,5737 |\n| 4 | 16 | 0,6063 |\n| 6 | 50 | 0,7510 |\n| sans limite | 206 | 0,7556 |",
+    "`src/journaliser.py`",
+    "```python\nmv = MlflowClient().get_model_version_by_alias('fraude', 'production')\nmlflow.set_experiment('tp7-explicabilite')\n```",
+  ].join("\n\n")
+  const tokens = document.lexStudyMarkdown(markdown)
+  const saved = schema.validateNoteDocument(document.markdownNote(markdown))
+  const reopened = document.readNoteDocument(JSON.parse(JSON.stringify(saved)), "")
+  const tables = reopened.content.filter(node => node.type === "table")
+  const cardTables = tokens.filter(token => token.type === "table")
+  assert.equal(tables.length, 2)
+  for (const [index, table] of tables.entries()) {
+    const card = cardTables[index]
+    assert.deepEqual(table.content.map(row => row.content.map(document.noteText)),
+      [card.header, ...card.rows].map(row => row.map(cell => cell.tokens.map(t => t.latex ?? t.text).join(""))))
+    assert.ok(table.content[0].content.every(cell => cell.type === "tableHeader"))
+    assert.ok(table.content.slice(1).every(row => row.content.every(cell => cell.type === "tableCell")))
+  }
+  assert.equal(tables[0].content[1].content[1].content[0].content[0].type, "inlineMath")
+  assert.equal(reopened.content.find(n => n.type === "blockMath").attrs.latex,
+    tokens.find(t => t.type === "blockMath").latex)
+  const python = reopened.content.find(n => n.type === "codeBlock")
+  assert.equal(python.attrs.language, "python")
+  assert.equal(document.noteText(python), tokens.find(t => t.type === "code").text)
+  tables[1].content[1].content[2].content[0].content[0].text = "0,2300"
+  assert.equal(document.noteText(schema.validateNoteDocument(reopened).content.filter(n => n.type === "table")[1]
+    .content[1].content[2]), "0,2300")
+})
 
 test("study routes authorize the note before opening inquiries or reading cards", async () => {
   let viewer = null
@@ -144,7 +356,7 @@ test("stale autosaves return the owned current version and never overwrite it", 
   const { PATCH } = load("app/api/notebook/[id]/route.ts", {
     "next/server": { NextResponse: Response },
     "@/lib/notebook/schema": schema,
-    "@/lib/server/notebook": load("lib/server/notebook.ts", { "@/lib/notebook/document": document, "@/lib/notebook/schema": schema }),
+    "@/lib/server/notebook": notebookServer,
     "@/lib/supabase/server": { createClient: async () => user, createServiceClient: async () => ({
       from: () => query((fields) => {
         assert.deepEqual(fields, { id, user_id: "owner", version: 3 })
@@ -283,9 +495,7 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   assert.equal((await save(null)).status, 422)
 
   const native = { type: "doc", content: structuredClone(savedQcm.body_nodes) }
-  const { editableNote } = load("lib/server/notebook.ts", {
-    "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
-  })
+  const { editableNote } = notebookServer
   native.content.push({ type: "paragraph", content: [{ type: "text", text: "Ma révision : <script> & vérifiée." }] })
   const fields = editableNote({ title: "Corrigé & révision", content_json: native })
   const persisted = JSON.parse(JSON.stringify({ ...fields, source_type: "explanation" }))
@@ -297,6 +507,7 @@ test("capture uses persisted messages and preserves formatting in a selected exc
   assert.equal(pdfFilename.notebookPdfFilename("QCM : Q1/Q20.pdf"), "QCM - Q1-Q20.pdf")
   const { GET } = load("app/api/notebook/[id]/pdf/route.ts", {
     "@/lib/notebook/document": document, "@/lib/notebook/schema": schema,
+    "@/lib/notebook/images": images, "@/lib/server/notebook-image": notebookImageServer,
     "@/lib/notebook/pdf": load("lib/notebook/pdf.ts", { "./document": document }),
     "@/lib/notebook/pdf-filename": pdfFilename,
     "@/lib/supabase/server": { createClient: async () => ({

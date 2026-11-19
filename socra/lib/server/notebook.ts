@@ -2,10 +2,12 @@ import type { Json, TablesInsert } from "@/types/database"
 import type { createClient } from "@/lib/supabase/server"
 import { noteText } from "@/lib/notebook/document"
 import { notebookId, validateNoteDocument } from "@/lib/notebook/schema"
+import { ownsNotebookImagePath } from "@/lib/notebook/images"
+import type { JSONContent } from "@tiptap/react"
 
 export type NoteClient = Awaited<ReturnType<typeof createClient>>
 
-export function editableNote(body: Record<string, unknown>) {
+export function editableNote(body: Record<string, unknown>, owner?: string) {
   if (typeof body.title !== "string" || !body.title.trim()) throw new Error("A note title is required.")
   const fields: Pick<TablesInsert<"notebook_notes">, "title" | "content" | "topic" | "content_json" | "tags" | "starred" | "course_id"> = {
     title: body.title.trim().slice(0, 240),
@@ -13,6 +15,13 @@ export function editableNote(body: Record<string, unknown>) {
   }
   if ("content_json" in body) {
     const doc = validateNoteDocument(body.content_json)
+    const checkImages = (node: JSONContent) => {
+      if (node.type === "image" && (!owner || !ownsNotebookImagePath(node.attrs?.src, owner))) {
+        throw new Error("This image does not belong to your Notebook.")
+      }
+      node.content?.forEach(checkImages)
+    }
+    checkImages(doc)
     fields.content_json = doc as Json
     fields.content = noteText(doc)
   } else if (typeof body.content === "string") fields.content = body.content

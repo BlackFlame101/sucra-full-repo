@@ -49,7 +49,7 @@ export async function POST(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   const body = await request.json().catch(() => null)
   let editable
-  try { editable = editableNote(body ?? {}) }
+  try { editable = editableNote(body ?? {}, user.id) }
   catch (error) { return NextResponse.json({ error: (error as Error).message }, { status: 400 }) }
   const sourceType = sourceTypes.includes(body.source_type) ? body.source_type : "manual"
   if (sourceType === "exercise") return NextResponse.json({ error: "Save exercise feedback from its inquiry." }, { status: 400 })

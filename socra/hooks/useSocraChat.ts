@@ -22,6 +22,7 @@ import {
   type DiagnosticReport,
   type EvaluationResult,
   type LearningMode,
+  type ExplainFormat,
   type NotebookContext,
   type PublicCard,
   type PublicCorrection,
@@ -70,7 +71,7 @@ interface UseSocraChatReturn {
   disconnect: () => void
 }
 
-type ChatMessageRequest = { text: string; displayText?: string; mode?: LearningMode; notebook?: NotebookContext
+type ChatMessageRequest = { text: string; displayText?: string; mode?: LearningMode; notebook?: NotebookContext; documentId?: string; explainFormat?: ExplainFormat
   continuation?: { from: string; requestId: string } }
 
 type Turn = {
@@ -366,11 +367,13 @@ export function useSocraChat(opts: UseSocraChatOpts): UseSocraChatReturn {
     finish(true, "Generation stopped.")
   }, [finish])
 
-  const sendMessage = useCallback(({ text, displayText, mode = "socratic", notebook, continuation }: ChatMessageRequest) => {
+  const sendMessage = useCallback(({ text, displayText, mode = "socratic", notebook, continuation, documentId, explainFormat }: ChatMessageRequest) => {
     const message = text.trim()
     if (!message) return
     const display = displayText?.trim() ? displayText.trim().slice(0, 500) : message
     startTurn({ message, ...(displayText?.trim() ? { displayText: display } : {}), mode, ...(notebook ? { notebook } : {}),
+      ...(mode === "explain" && !notebook && !continuation && documentId ? { documentId } : {}),
+      ...(mode === "explain" && !notebook && !continuation && explainFormat ? { explainFormat } : {}),
       ...(continuation ? { continueCourseFrom: continuation.from } : {}) }, display, continuation?.requestId)
   }, [startTurn])
 

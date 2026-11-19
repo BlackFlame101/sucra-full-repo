@@ -58,6 +58,7 @@ class GeneratedQcmAnswer:
     selected_keys: tuple[str, ...]
     option_reasons: tuple[QcmOptionReason, ...]
     answer_basis: Literal["official_key", "source_supported_reasoned", "model_proposed", "unresolved"]
+    reference_pages: tuple[tuple[str, int], ...] = ()
 
 
 def _source_text(page: int, text: str, start: int, end: int) -> tuple[str, SourceSpan]:

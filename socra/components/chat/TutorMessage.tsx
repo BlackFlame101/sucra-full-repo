@@ -36,11 +36,12 @@ function formatTutorContent(content: string) {
 
 export function TutorMessage({ content, isStreaming, partial, explanationPreview }: TutorMessageProps) {
   return (
-    <div className="flex min-w-0 max-w-[85%] gap-3">
+    <div className={explanationPreview ? "w-full min-w-0" : "flex min-w-0 max-w-[85%] gap-3"}>
+      {!explanationPreview &&
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-secondary/15 mt-1">
         <Bot className="h-4 w-4 text-secondary" />
-      </div>
-      <div className="space-y-1 min-w-0">
+      </div>}
+      <div className={explanationPreview ? "w-full min-w-0 space-y-1" : "min-w-0 space-y-1"}>
         <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground inline-flex items-center gap-1.5">
           Socra Tutor
           {isStreaming && (
@@ -50,8 +51,9 @@ export function TutorMessage({ content, isStreaming, partial, explanationPreview
             </span>
           )}
         </span>
-        <div className="min-w-0 max-w-full rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3">
-          <div className="font-serif text-[15px] leading-relaxed text-foreground/90">
+        <div className={explanationPreview ? "explanation-document min-w-0 px-4 py-4 sm:px-6 sm:py-5"
+          : "min-w-0 max-w-full rounded-xl rounded-tl-sm border border-border/50 bg-card/50 px-4 py-3"}>
+          <div className={explanationPreview ? "explanation-document-body" : "font-serif text-[15px] leading-relaxed text-foreground/90"}>
             {explanationPreview ? <StudyMarkdown content={content} /> : formatTutorContent(content)}
             {partial && <p className="mt-2 text-xs text-muted-foreground">Partial response</p>}
             {!isStreaming && !partial && <button type="button" className="mt-2 text-xs text-secondary" onClick={() => void navigator.clipboard.writeText(content)}>Copy response</button>}
